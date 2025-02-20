@@ -75,7 +75,6 @@ end
 function factoriselocals(A::SSCMatrix{T}) where T
   localfact = lu!(view(A.A, A.indices[1], A.indices[1])) # can't use a view
   d = Dict{Int, typeof(localfact)}(1=>localfact)
-  #for (i_1, li) in enumerate(A.indices[2:end]) # parallelisable
   for (c, i, li) in collect(enumeratelocalindices(A))[2:end]# parallelisable
     d[i] = lu!(view(A.A, li, li)) # can't use a view
   end
