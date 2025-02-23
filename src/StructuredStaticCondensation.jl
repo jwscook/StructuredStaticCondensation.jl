@@ -1,6 +1,6 @@
 module StructuredStaticCondensation
 
-using LinearAlgebra
+using LinearAlgebra, Serialization
 
 export SSCMatrix, factorise!
 
@@ -71,17 +71,14 @@ Base.size(A::SSCMatrix, i) = size(A.A, i)
 islocalblock(i) = isodd(i)
 iscouplingblock(i) = !islocalblock(i)
 
-function enumeratelocalindices(A::SSCMatrix)
-  return A.enumeratelocalindices # zip(1:A.nlocalblocks, 1:2:length(A.indices), A.indices[1:2:end])
-end
-function enumeratecouplingindices(A::SSCMatrix)
-  return A.enumeratecouplingindices #zip(1:A.ncouplingblocks, 2:2:length(A.indices), A.indices[2:2:end-1])
-end
+enumeratelocalindices(A::SSCMatrix) = A.enumeratelocalindices
+enumeratecouplingindices(A::SSCMatrix) = A.enumeratecouplingindices
+
+lutype(A::Matrix{T}) where T = LU{T, Matrix{T}, Vector{Int64}}
 
 function factoriselocals(A::SSCMatrix{T}) where T
-  localfact = lu!(view(A.A, A.indices[1], A.indices[1])) # can't use a view
-  d = Dict{Int, typeof(localfact)}(1=>localfact)
-  for (c, i, li) in collect(enumeratelocalindices(A))[2:end]# parallelisable
+  d = Dict{Int, lutype(A.A)}()
+  for (c, i, li) in enumeratelocalindices(A) # parallelisable
     d[i] = lu!(view(A.A, li, li)) # can't use a view
   end
   return d
@@ -140,13 +137,14 @@ function assemblecoupledrhs!(b, A::SSCMatrix, B, localsolutions, couplings)
   return b
 end
 
-function assemblecoupledlhs!(A::SSCMatrix, couplings; assignblocks=false, applycouplings=false)
+function assemblecoupledlhs!(A::SSCMatrix, couplings;
+    assignblocks=false, applycouplings=false)
   M = A.reducedlhs
   @views for (c, i, li) in enumeratecouplingindices(A) # parallelisable
     rows = A.reducedcoupledindices[c]
     assignblocks && (M[rows, rows] .= A.A[li, li])
-    aim = A.A[li, A.indices[i-1]]
-    aip = A.A[li, A.indices[i+1]]
+    aim = view(A.A, li, A.indices[i-1])
+    aip = view(A.A, li, A.indices[i+1])
     applycouplings && (M[rows, rows] .-= aim * couplings[(i - 1, i)])
     applycouplings && (M[rows, rows] .-= aip * couplings[(i + 1, i)])
     if c + 1 <= A.ncouplingblocks
@@ -185,39 +183,53 @@ function localx!(x, A::SSCMatrix{T}, localsolutions, couplings) where T
   return x
 end
 
-defaultbarriercallback(args...) = nothing
+defaultcallback(args...) = nothing
 
-function factorise!(A::SSCMatrix; barriercallback=defaultbarriercallback)
+function distributeenumerations!(A::SSCMatrix, rank, commsize)
+  @assert 0 <= rank < commsize
+  indices = rank + 1:commsize:length(A.enumeratelocalindices)
+  deleteat!(A.enumeratelocalindices, indices)
+  indices = rank + 1:commsize:length(A.enumeratecouplingindices)
+  deleteat!(A.enumeratecouplingindices, indices)
+end
+
+#function serialise(x)
+#  s = IOBuffer()
+#  Serialization.serialize(s, x)
+#  take!(s)
+#end
+#function deserialise(x, len, op=merge)
+#  y = (deserialize(IOBuffer(x[i*len+1:(i+1)*len])) for i in 0:length(x)÷len-1)
+#  return reduce(op, y)
+#end
+
+function factorise!(A::SSCMatrix; callback=defaultcallback)
   assemblecoupledlhs!(A, nothing; assignblocks=true)
-  barriercallback(A)
+  callback(A.reducedlhs)
   localfactors = factoriselocals(A)
-  barriercallback(A, localfactors)
+  callback(localfactors)
   couplings = calculatecouplings(A, localfactors)
-  barriercallback(A, localfactors, couplings)
+  callback(couplings)
   return SSCMatrixFactorisation(A, localfactors, couplings)
 end
 
-function LinearAlgebra.ldiv!(A::SSCMatrixFactorisation{T}, b; barriercallback=defaultbarriercallback) where T
-
+function LinearAlgebra.ldiv!(A::SSCMatrixFactorisation{T}, b;
+    callback=defaultcallback) where {T}
   localsolutions = solvelocalparts(A, b)
+  callback(localsolutions)
 
   x = zeros(T, size(b))
   x = coupledx!(x, A.A, b, localsolutions, A.couplings)
-  barriercallback(x)
+  callback(x)
   x = localx!(x, A.A, localsolutions, A.couplings)
-  barriercallback(x)
+  callback(x)
   return x
 end
 
-function LinearAlgebra.ldiv!(A::SSCMatrix{T}, b) where T
-  F = factorise!(A)
-
-  localsolutions = solvelocalparts(F, b)
-
-  x = zeros(T, size(b))
-  x = coupledx!(x, F.A, b, localsolutions, F.couplings)
-  x = localx!(x, F.A, localsolutions, F.couplings)
-  return x
+function LinearAlgebra.ldiv!(A::SSCMatrix{T}, b;
+    callback=defaultcallback) where T
+  F = factorise!(A; callback=callback)
+  return ldiv!(F, b; callback=callback)
 end
 
 end # module StructuredSSC
