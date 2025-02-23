@@ -4,7 +4,7 @@ using LinearAlgebra
 
 export SSCMatrix, factorise!
 
-struct SSCMatrix{T, M<:AbstractMatrix{T}} <: AbstractMatrix{T}
+struct SSCMatrix{T, M<:AbstractMatrix{T}, U} <: AbstractMatrix{T}
   A::M
   indices::Vector{UnitRange{Int}}
   nlocalblocks::Int
@@ -12,33 +12,39 @@ struct SSCMatrix{T, M<:AbstractMatrix{T}} <: AbstractMatrix{T}
   reducedlocalindices::Vector{UnitRange{Int}}
   reducedcoupledindices::Vector{UnitRange{Int}}
   reducedlhs::M
-end
+  enumeratelocalindices::U
+  enumeratecouplingindices::U
+  function SSCMatrix(A::AbstractMatrix{T}, blockindices) where T
+    n = size(A, 1)
+    @assert isodd(length(blockindices))
+    ncouplingblocks = (length(blockindices) - 1) ÷ 2
+    nlocalblocks = ncouplingblocks + 1
 
-function SSCMatrix(A::AbstractMatrix{T}, blockindices) where T
-  n = size(A, 1)
-  @assert isodd(length(blockindices))
-  ncouplingblocks = (length(blockindices) - 1) ÷ 2
-  nlocalblocks = ncouplingblocks + 1
+    reducedlocalindices = Vector{UnitRange{Int}}()
+    push!(reducedlocalindices, blockindices[1])
+    for (c, i) in enumerate(3:2:length(blockindices))
+      inds = (blockindices[i] .- blockindices[i][1] .+ 1) .+ reducedlocalindices[c][end]
+      push!(reducedlocalindices, inds)
+    end
+    reducedcoupledindices = Vector{UnitRange{Int}}()
+    push!(reducedcoupledindices, blockindices[2] .- blockindices[2][1] .+ 1)
+    for (c, i) in enumerate(4:2:length(blockindices))
+      inds = (blockindices[i] .- blockindices[i][1] .+ 1) .+ reducedcoupledindices[c][end]
+      push!(reducedcoupledindices, inds)
+    end
 
-  reducedlocalindices = Vector{UnitRange{Int}}()
-  push!(reducedlocalindices, blockindices[1])
-  for (c, i) in enumerate(3:2:length(blockindices))
-    inds = (blockindices[i] .- blockindices[i][1] .+ 1) .+ reducedlocalindices[c][end]
-    push!(reducedlocalindices, inds) 
+    totalcouplingblocksize = sum(length(i) for i in reducedcoupledindices)
+    # allocate reduced lhs
+    reducedlhs = similar(A, totalcouplingblocksize, totalcouplingblocksize)
+    fill!(reducedlhs, 0)
+
+    enumeratelocalindices = collect(zip(1:nlocalblocks, 1:2:length(blockindices), blockindices[1:2:end]))
+    enumeratecouplingindices = collect(zip(1:ncouplingblocks, 2:2:length(blockindices), blockindices[2:2:end-1]))
+    M = typeof(A)
+    U = typeof(enumeratelocalindices)
+
+    return new{T, M, U}(A, blockindices, nlocalblocks, ncouplingblocks, reducedlocalindices, reducedcoupledindices, reducedlhs, enumeratelocalindices, enumeratecouplingindices)
   end
-  reducedcoupledindices = Vector{UnitRange{Int}}()
-  push!(reducedcoupledindices, blockindices[2] .- blockindices[2][1] .+ 1)
-  for (c, i) in enumerate(4:2:length(blockindices))
-    inds = (blockindices[i] .- blockindices[i][1] .+ 1) .+ reducedcoupledindices[c][end]
-    push!(reducedcoupledindices, inds) 
-  end
-
-  totalcouplingblocksize = sum(length(i) for i in reducedcoupledindices)
-  # allocate reduced lhs
-  reducedlhs = similar(A, totalcouplingblocksize, totalcouplingblocksize)
-  fill!(reducedlhs, 0)
-
-  return SSCMatrix(A, blockindices, nlocalblocks, ncouplingblocks, reducedlocalindices, reducedcoupledindices, reducedlhs)
 end
 
 function SSCMatrix(A::AbstractMatrix{T}, localblocksize, couplingblocksize) where T
@@ -66,10 +72,10 @@ islocalblock(i) = isodd(i)
 iscouplingblock(i) = !islocalblock(i)
 
 function enumeratelocalindices(A::SSCMatrix)
-  return zip(1:A.nlocalblocks, 1:2:length(A.indices), A.indices[1:2:end])
+  return A.enumeratelocalindices # zip(1:A.nlocalblocks, 1:2:length(A.indices), A.indices[1:2:end])
 end
 function enumeratecouplingindices(A::SSCMatrix)
-  return zip(1:A.ncouplingblocks, 2:2:length(A.indices), A.indices[2:2:end-1])
+  return A.enumeratecouplingindices #zip(1:A.ncouplingblocks, 2:2:length(A.indices), A.indices[2:2:end-1])
 end
 
 function factoriselocals(A::SSCMatrix{T}) where T
@@ -179,20 +185,27 @@ function localx!(x, A::SSCMatrix{T}, localsolutions, couplings) where T
   return x
 end
 
-function factorise!(A::SSCMatrix)
+defaultbarriercallback(args...) = nothing
+
+function factorise!(A::SSCMatrix; barriercallback=defaultbarriercallback)
   assemblecoupledlhs!(A, nothing; assignblocks=true)
+  barriercallback(A)
   localfactors = factoriselocals(A)
+  barriercallback(A, localfactors)
   couplings = calculatecouplings(A, localfactors)
+  barriercallback(A, localfactors, couplings)
   return SSCMatrixFactorisation(A, localfactors, couplings)
 end
 
-function LinearAlgebra.ldiv!(A::SSCMatrixFactorisation{T}, b) where T
+function LinearAlgebra.ldiv!(A::SSCMatrixFactorisation{T}, b; barriercallback=defaultbarriercallback) where T
 
   localsolutions = solvelocalparts(A, b)
 
   x = zeros(T, size(b))
   x = coupledx!(x, A.A, b, localsolutions, A.couplings)
+  barriercallback(x)
   x = localx!(x, A.A, localsolutions, A.couplings)
+  barriercallback(x)
   return x
 end
 
