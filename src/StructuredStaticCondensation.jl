@@ -161,9 +161,11 @@ function assemblecoupledlhs!(A::SSCMatrix, couplings;
   return M
 end
 
-function coupledx!(x, A::SSCMatrix{T}, b, localsolutions, couplings) where {T}
-  Ac = assemblecoupledlhs!(A, couplings; applycouplings=true)
+function coupledx!(x, A::SSCMatrix{T}, b, localsolutions, couplings;
+    callback=defaultcallback) where {T}
   bc = assemblecoupledrhs(A, b, localsolutions, couplings)
+  callback(bc)
+  Ac = A.reducedlhs
   xc = Ac \ bc
   for (c, i, ind) in enumeratecouplingindices(A)
     x[ind, :] .= xc[A.reducedcoupledindices[c], :]
@@ -171,13 +173,13 @@ function coupledx!(x, A::SSCMatrix{T}, b, localsolutions, couplings) where {T}
   return x
 end
 
-function localx!(x, A::SSCMatrix{T}, localsolutions, couplings) where T
+function localx!(x, cx, A::SSCMatrix{T}, localsolutions, couplings) where T
   for (c, i, li) in enumeratelocalindices(A) # parallelisable
     rows = A.reducedlocalindices[c]
     x[li, :] .= localsolutions[i]
     for j in (i + 1, i - 1)
       0 < j <= length(A.indices) || continue
-      x[li, :] .-= couplings[(i, j)] * x[A.indices[j], :]
+      x[li, :] .-= couplings[(i, j)] * cx[A.indices[j], :]
     end
   end
   return x
@@ -200,11 +202,13 @@ end
 function factorise!(A::SSCMatrix; callback=defaultcallback)
   callback()
   assemblecoupledlhs!(A, nothing; assignblocks=true)
-  callback(A.reducedlhs)
+  callback()
   localfactors = factoriselocals(A)
   callback(localfactors)
   couplings = calculatecouplings(A, localfactors)
   callback(couplings)
+  assemblecoupledlhs!(A, couplings; applycouplings=true)
+  callback(A.reducedlhs)
   return SSCMatrixFactorisation(A, localfactors, couplings)
 end
 
@@ -213,13 +217,16 @@ function LinearAlgebra.ldiv!(A::SSCMatrixFactorisation{T}, b;
   callback()
   localsolutions = solvelocalparts(A, b)
   callback(localsolutions)
-
-  x = zeros(T, size(b))
-  x = coupledx!(x, A.A, b, localsolutions, A.couplings)
-  callback(x)
-  x = localx!(x, A.A, localsolutions, A.couplings)
-  callback(x)
-  return x
+  # build the solution out of two vectors so that the second callback
+  # doesn't double count values during its MPI reduction
+  # this could be better, if 
+  cx = zeros(T, size(b))
+  cx = coupledx!(cx, A.A, b, localsolutions, A.couplings; callback=callback)
+  callback(cx)
+  lx = zeros(T, size(b))
+  lx = localx!(lx, cx, A.A, localsolutions, A.couplings)
+  callback(lx)
+  return cx .+ lx
 end
 
 function LinearAlgebra.ldiv!(A::SSCMatrix{T}, b;

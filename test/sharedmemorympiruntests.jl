@@ -16,13 +16,15 @@ end
 (cb::MPICallBack)() = MPI.Barrier(cb.comm)
 # this could be better - send key-val pairs directly to rank that needs them
 function (cb::MPICallBack)(x::AbstractArray)
+    #sleep(cb.rank)
     MPI.Allreduce!(x, +, cb.comm)
+    #sleep(cb.rank)
+    #@show "B", cb.rank, x
     return x
 end
 
 function (cb::MPICallBack)(x::Dict) # a work around
   # this could be better - send key-val pairs directly to rank that needs them
-  MPI.Barrier(cb.comm)
   s = IOBuffer()
   Serialization.serialize(s, x)
   s = take!(s)
@@ -36,6 +38,17 @@ end
 
 using StructuredStaticCondensation
 
+function makesharedmatrix(sharedrank, sharedcomm, tmp)
+  dimslocal = sharedrank == 0 ? size(tmp) : (0, 0)
+  win, arrayptr = MPI.Win_allocate_shared(Array{Float64}, prod(dimslocal), sharedcomm)
+  MPI.Barrier(sharedcomm)
+  A = MPI.Win_shared_query(Array{Float64}, prod(size(tmp)), win; rank=0)
+  A = reshape(A, size(tmp))
+  sharedrank == 0 && (A .= tmp)
+  MPI.Barrier(sharedcomm)
+  return A, win
+end
+
 using Random, Test, LinearAlgebra
 
 @testset "SSCCondensation" begin
@@ -43,15 +56,27 @@ using Random, Test, LinearAlgebra
   commsize = MPI.Comm_size(comm)
   rank = MPI.Comm_rank(comm)
   Random.seed!(rank)
+  color = rank < commsize ÷ 2 ? 0 : 1 # split into two shared memory mpi communicators
+  sharedcomm = MPI.Comm_split(comm, color, rank)
+  sharedrank = MPI.Comm_rank(sharedcomm)
+  sharedsize = MPI.Comm_size(sharedcomm)
 
   function dotest(tmp, L, C)
-    A = MPI.bcast(tmp, 0, comm)
-    b = MPI.bcast(rand(size(A, 1)), 0, comm)
-    x = A \ b
+    A, win = makesharedmatrix(sharedrank, sharedcomm, tmp)
+    (x,b) = if sharedrank == 0
+      b = rand(size(A, 1))
+      x = tmp \ b
+      (x, b)
+    else
+      (nothing, nothing)
+    end
+    x = MPI.bcast(x, 0, sharedcomm)
+    b = MPI.bcast(b, 0, sharedcomm)
 
     SCM = SSCMatrix(A, L, C)
-    StructuredStaticCondensation.distributeenumerations!(SCM, rank, commsize)
-    @test ldiv!(SCM, b; callback=MPICallBack(comm, rank, commsize)) ≈ x
+    StructuredStaticCondensation.distributeenumerations!(SCM, sharedrank, sharedsize)
+    sleep(rank)
+    @test ldiv!(SCM, b; callback=MPICallBack(sharedcomm, sharedrank, sharedsize)) ≈ x
   end
 
   for (L, C) in ((3, 2), (4, 2), (16, 4), (5, 7), (128, 64), (256, 128), (1024, 512))
