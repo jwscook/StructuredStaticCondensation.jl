@@ -1,6 +1,6 @@
 module StructuredStaticCondensation
 
-using LinearAlgebra, Serialization
+using LinearAlgebra
 
 export SSCMatrix, factorise!
 
@@ -187,23 +187,18 @@ defaultcallback(args...) = nothing
 
 function distributeenumerations!(A::SSCMatrix, rank, commsize)
   @assert 0 <= rank < commsize
-  indices = rank + 1:commsize:length(A.enumeratelocalindices)
-  deleteat!(A.enumeratelocalindices, indices)
-  indices = rank + 1:commsize:length(A.enumeratecouplingindices)
-  deleteat!(A.enumeratecouplingindices, indices)
+  # first get the indices we want to keep
+  indices = rank+1:commsize:length(A.enumeratelocalindices)
+  # then delete all other entires using filter
+  deleteat!(A.enumeratelocalindices,
+    filter!(i->!in(i, indices), collect(eachindex(A.enumeratelocalindices))))
+  indices = rank+1:commsize:length(A.enumeratecouplingindices)
+  deleteat!(A.enumeratecouplingindices,
+    filter!(i->!in(i, indices), collect(eachindex(A.enumeratecouplingindices))))
 end
 
-#function serialise(x)
-#  s = IOBuffer()
-#  Serialization.serialize(s, x)
-#  take!(s)
-#end
-#function deserialise(x, len, op=merge)
-#  y = (deserialize(IOBuffer(x[i*len+1:(i+1)*len])) for i in 0:length(x)÷len-1)
-#  return reduce(op, y)
-#end
-
 function factorise!(A::SSCMatrix; callback=defaultcallback)
+  callback()
   assemblecoupledlhs!(A, nothing; assignblocks=true)
   callback(A.reducedlhs)
   localfactors = factoriselocals(A)
@@ -215,6 +210,7 @@ end
 
 function LinearAlgebra.ldiv!(A::SSCMatrixFactorisation{T}, b;
     callback=defaultcallback) where {T}
+  callback()
   localsolutions = solvelocalparts(A, b)
   callback(localsolutions)
 
