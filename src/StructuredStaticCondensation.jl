@@ -76,10 +76,10 @@ enumeratecouplingindices(A::SSCMatrix) = A.enumeratecouplingindices
 
 lutype(A::Matrix{T}) where T = LU{T, Matrix{T}, Vector{Int64}}
 
-function factoriselocals(A::SSCMatrix{T}) where T
+function factoriselocals(A::SSCMatrix{T}; inplace=true) where T
   d = Dict{Int, lutype(A.A)}()
   for (c, i, li) in enumeratelocalindices(A) # parallelisable
-    d[i] = lu!(view(A.A, li, li))
+    d[i] = inplace ? lu!(view(A.A, li, li)) : lu(view(A.A, li, li))
     @assert all(isfinite, d[i].L) # remove after debugged
     @assert all(isfinite, d[i].U) # remove after debugged
   end
@@ -196,11 +196,11 @@ function distributeenumerations!(A::SSCMatrix, rank, commsize)
     filter!(i->!in(i, indices), collect(eachindex(A.enumeratecouplingindices))))
 end
 
-function factorise!(A::SSCMatrix; callback=defaultcallback)
+function factorise!(A::SSCMatrix; callback=defaultcallback, inplace=true)
   callback()
   assemblecoupledlhs!(A, nothing; assignblocks=true)
   callback()
-  localfactors = factoriselocals(A)
+  localfactors = factoriselocals(A; inplace=inplace)
   callback(localfactors)
   couplings = calculatecouplings(A, localfactors)
   callback(couplings)
@@ -227,8 +227,8 @@ function LinearAlgebra.ldiv!(A::SSCMatrixFactorisation{T}, b;
 end
 
 function LinearAlgebra.ldiv!(A::SSCMatrix{T}, b;
-    callback=defaultcallback) where T
-  F = factorise!(A; callback=callback)
+    callback=defaultcallback, inplace=true) where T
+  F = factorise!(A; callback=callback, inplace=inplace)
   return ldiv!(F, b; callback=callback)
 end
 
