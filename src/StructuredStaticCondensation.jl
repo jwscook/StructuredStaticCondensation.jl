@@ -4,6 +4,8 @@ using LinearAlgebra
 
 export SSCMatrix, factorise!
 
+const DEFAULT_INPLACE = true
+
 struct SSCMatrix{T, M<:AbstractMatrix{T}, U} <: AbstractMatrix{T}
   A::M
   indices::Vector{UnitRange{Int}}
@@ -76,7 +78,7 @@ enumeratecouplingindices(A::SSCMatrix) = A.enumeratecouplingindices
 
 lutype(A::Matrix{T}) where T = LU{T, Matrix{T}, Vector{Int64}}
 
-function factoriselocals(A::SSCMatrix{T}; inplace=true) where T
+function factoriselocals(A::SSCMatrix{T}; inplace=DEFAULT_INPLACE) where T
   d = Dict{Int, lutype(A.A)}()
   for (c, i, li) in enumeratelocalindices(A) # parallelisable
     d[i] = inplace ? lu!(view(A.A, li, li)) : lu(view(A.A, li, li))
@@ -196,7 +198,7 @@ function distributeenumerations!(A::SSCMatrix, rank, commsize)
     filter!(i->!in(i, indices), collect(eachindex(A.enumeratecouplingindices))))
 end
 
-function factorise!(A::SSCMatrix; callback=defaultcallback, inplace=true)
+function factorise!(A::SSCMatrix; callback=defaultcallback, inplace=DEFAULT_INPLACE)
   callback()
   assemblecoupledlhs!(A, nothing; assignblocks=true)
   callback()
@@ -208,9 +210,9 @@ function factorise!(A::SSCMatrix; callback=defaultcallback, inplace=true)
   callback(A.reducedlhs)
   return SSCMatrixFactorisation(A, localfactors, couplings)
 end
-
+# inplace won't do anything, but this is needed to keep the API consistent
 function LinearAlgebra.ldiv!(A::SSCMatrixFactorisation{T}, b;
-    callback=defaultcallback) where {T}
+    callback=defaultcallback, inplace=DEFAULT_INPLACE) where {T}
   callback()
   localsolutions = calculatelocalsolutions(A, b)
   callback(localsolutions)
@@ -227,7 +229,7 @@ function LinearAlgebra.ldiv!(A::SSCMatrixFactorisation{T}, b;
 end
 
 function LinearAlgebra.ldiv!(A::SSCMatrix{T}, b;
-    callback=defaultcallback, inplace=true) where T
+    callback=defaultcallback, inplace=DEFAULT_INPLACE) where T
   F = factorise!(A; callback=callback, inplace=inplace)
   return ldiv!(F, b; callback=callback)
 end
