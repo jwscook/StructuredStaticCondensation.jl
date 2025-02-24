@@ -79,7 +79,9 @@ lutype(A::Matrix{T}) where T = LU{T, Matrix{T}, Vector{Int64}}
 function factoriselocals(A::SSCMatrix{T}) where T
   d = Dict{Int, lutype(A.A)}()
   for (c, i, li) in enumeratelocalindices(A) # parallelisable
-    d[i] = lu!(view(A.A, li, li)) # can't use a view
+    d[i] = lu!(view(A.A, li, li))
+    @assert all(isfinite, d[i].L) # remove after debugged
+    @assert all(isfinite, d[i].U) # remove after debugged
   end
   return d
 end
@@ -90,10 +92,12 @@ function calculatecouplings(A::SSCMatrix{T,M}, localfactors) where {T,M}
     if i - 1 >= 1
       lim = A.indices[i-1]
       d[(i-1, i)] = localfactors[i-1] \ A.A[lim, li]
+      @assert all(isfinite, d[(i-1, i)]) # remove after debugged
     end
     if i + 1 <= length(A.indices)
       lip = A.indices[i+1]
       d[(i+1, i)] = localfactors[i+1] \ A.A[lip, li]
+      @assert all(isfinite, d[(i+1, i)]) # remove after debugged
     end
   end
   return d
@@ -105,22 +109,13 @@ struct SSCMatrixFactorisation{T,M,U,V}
   couplings::V
 end
 
-function solvelocalparts(F::SSCMatrixFactorisation{T,M}, b) where {T,M}
+function calculatelocalsolutions(F::SSCMatrixFactorisation{T,M}, b) where {T,M}
   d = Dict{Int, M}()
   for (c, i, li) in enumeratelocalindices(F.A) # parallelisable
     d[i] = F.localfactors[i] \ b[li, :]
+    @assert all(isfinite, d[i]) # remove after debugged
   end
   return d
-end
-
-function couplingblockindices(A::SSCMatrix, i)
-  @assert i > 1
-  return A.indices[i] .- A.indices[i-1][1] .+ 1
-end
-
-function localblockindices(A::SSCMatrix, i)
-  @assert i > 1
-  return A.indices[i] .- A.indices[i-1][1] .+ 1
 end
 
 function assemblecoupledrhs(A::SSCMatrix, B, localsolutions, couplings)
@@ -167,6 +162,7 @@ function coupledx!(x, A::SSCMatrix{T}, b, localsolutions, couplings;
   callback(bc)
   Ac = A.reducedlhs
   xc = Ac \ bc
+  @assert all(isfinite, xc) # remove after debugged
   for (c, i, ind) in enumeratecouplingindices(A)
     x[ind, :] .= xc[A.reducedcoupledindices[c], :]
   end
@@ -182,6 +178,7 @@ function localx!(x, cx, A::SSCMatrix{T}, localsolutions, couplings) where T
       x[li, :] .-= couplings[(i, j)] * cx[A.indices[j], :]
     end
   end
+  @assert all(isfinite, x) # remove after debugged
   return x
 end
 
@@ -215,7 +212,7 @@ end
 function LinearAlgebra.ldiv!(A::SSCMatrixFactorisation{T}, b;
     callback=defaultcallback) where {T}
   callback()
-  localsolutions = solvelocalparts(A, b)
+  localsolutions = calculatelocalsolutions(A, b)
   callback(localsolutions)
   # build the solution out of two vectors so that the second callback
   # doesn't double count values during its MPI reduction
