@@ -18,7 +18,7 @@ for (L, C) in ((2, 1), (3, 2), (4, 2), (16, 4), (5, 7), (128, 64), (256, 128), (
   b = rand(size(A, 1))
   x = A \ b
   SCM = SSCMatrix(A, L, C)
-  @test ldiv!(SCM, b) ≈ x
+  @test ldiv!(SCM, b; inplace=true) ≈ x
   
   A = [A11 t12 zLL zLC zLL;
        s21 a22 s23 a24 zCL;
@@ -28,7 +28,7 @@ for (L, C) in ((2, 1), (3, 2), (4, 2), (16, 4), (5, 7), (128, 64), (256, 128), (
   b = rand(size(A, 1))
   x = A \ b
   SCM = SSCMatrix(A, L, C)
-  @test ldiv!(SCM, b) ≈ x
+  @test ldiv!(SCM, b; inplace=true) ≈ x
   
   A = [A11 t12 zLL zLC zLL zLC zLL;
        s21 a22 s23 a24 zCL zCC zCL;
@@ -42,6 +42,6 @@ for (L, C) in ((2, 1), (3, 2), (4, 2), (16, 4), (5, 7), (128, 64), (256, 128), (
   x = A \ b
   SCM = SSCMatrix(A, L, C)
   SCMf = factorise!(SCM)
-  @test ldiv!(SCMf, b) ≈ x
+  @test ldiv!(SCMf, b; inplace=false) ≈ x
 end
 end

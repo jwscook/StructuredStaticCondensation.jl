@@ -14,7 +14,6 @@ struct MPICallBack{T}
 end
 
 (cb::MPICallBack)() = MPI.Barrier(cb.comm)
-# this could be better - send key-val pairs directly to rank that needs them
 function (cb::MPICallBack)(x::AbstractArray)
   MPI.Allreduce!(x, +, cb.comm)
   return x
@@ -50,7 +49,20 @@ using Random, Test, LinearAlgebra
 
     SCM = SSCMatrix(A, L, C)
     StructuredStaticCondensation.distributeenumerations!(SCM, rank, commsize)
-    @test ldiv!(SCM, b; callback=MPICallBack(comm, rank, commsize)) ≈ x
+    MPI.Barrier(comm)
+    SCMf = factorise!(deepcopy(SCM);
+      callback=MPICallBack(comm, rank, commsize), inplace=false)
+    for (c, i, li) in SCM.enumeratelocalindices
+      lf = SCMf.localfactors[i]
+      @test lf == lu(A[li, li])
+    end
+    for (c, i, li) in SCM.enumeratecouplingindices
+      cp = SCMf.couplings[i-1, i]
+      @test cp == SCMf.localfactors[i-1] \ (A[SCM.indices[i-1], li])
+      cp = SCMf.couplings[i+1, i]
+      @test cp == SCMf.localfactors[i+1] \ (A[SCM.indices[i+1], li])
+    end
+    @test ldiv!(SCM, b; callback=MPICallBack(comm, rank, commsize), inplace=false) ≈ x
   end
 
   for (L, C) in ((3, 2), (4, 2), (16, 4), (5, 7), (128, 64), (256, 128), (1024, 512))
