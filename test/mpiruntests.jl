@@ -16,13 +16,12 @@ end
 (cb::MPICallBack)() = MPI.Barrier(cb.comm)
 # this could be better - send key-val pairs directly to rank that needs them
 function (cb::MPICallBack)(x::AbstractArray)
-    MPI.Allreduce!(x, +, cb.comm)
-    return x
+  MPI.Allreduce!(x, +, cb.comm)
+  return x
 end
 
 function (cb::MPICallBack)(x::Dict) # a work around
   # this could be better - send key-val pairs directly to rank that needs them
-  MPI.Barrier(cb.comm)
   s = IOBuffer()
   Serialization.serialize(s, x)
   s = take!(s)
