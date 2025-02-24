@@ -77,6 +77,7 @@ using Random, Test, LinearAlgebra
     StructuredStaticCondensation.distributeenumerations!(SCM, sharedrank, sharedsize)
     sleep(rank)
     @test ldiv!(SCM, b; callback=MPICallBack(sharedcomm, sharedrank, sharedsize)) ≈ x
+    MPI.free(win)
   end
 
   for (L, C) in ((3, 2), (4, 2), (16, 4), (5, 7), (128, 64), (256, 128), (1024, 512))
