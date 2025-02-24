@@ -108,7 +108,7 @@ struct SSCMatrixFactorisation{T,M,U,V}
   couplings::V
 end
 
-function solvelocalparts(F::SSCMatrixFactorisation{T,M}, b) where {T,M}
+function calculatelocalsolutions(F::SSCMatrixFactorisation{T,M}, b) where {T,M}
   d = Dict{Int, M}()
   for (c, i, li) in enumeratelocalindices(F.A) # parallelisable
     d[i] = F.localfactors[i] \ b[li, :]
@@ -199,7 +199,7 @@ end
 
 function LinearAlgebra.ldiv!(A::SSCMatrixFactorisation{T}, b; barriercallback=defaultbarriercallback) where T
 
-  localsolutions = solvelocalparts(A, b)
+  localsolutions = calculatelocalsolutions(A, b)
 
   x = zeros(T, size(b))
   x = coupledx!(x, A.A, b, localsolutions, A.couplings)
@@ -212,7 +212,7 @@ end
 function LinearAlgebra.ldiv!(A::SSCMatrix{T}, b) where T
   F = factorise!(A)
 
-  localsolutions = solvelocalparts(F, b)
+  localsolutions = calculatelocalsolutions(F, b)
 
   x = zeros(T, size(b))
   x = coupledx!(x, F.A, b, localsolutions, F.couplings)
