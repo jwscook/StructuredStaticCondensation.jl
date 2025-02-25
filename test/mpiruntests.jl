@@ -13,13 +13,13 @@ struct MPICallBack{T}
   commsize::Int
 end
 
-(cb::MPICallBack)() = MPI.Barrier(cb.comm)
-function (cb::MPICallBack)(x::AbstractArray)
+(cb::MPICallBack)(A) = MPI.Barrier(cb.comm)
+function (cb::MPICallBack)(A, x::AbstractArray)
   MPI.Allreduce!(x, +, cb.comm)
   return x
 end
 
-function (cb::MPICallBack)(x::Dict) # a work around
+function (cb::MPICallBack)(A, x::Dict) # a work around
   # this could be better - send key-val pairs directly to rank that needs them
   s = IOBuffer()
   Serialization.serialize(s, x)
@@ -50,6 +50,17 @@ using Random, Test, LinearAlgebra
     SCM = SSCMatrix(A, L, C)
     StructuredStaticCondensation.distributeenumerations!(SCM, rank, commsize)
     MPI.Barrier(comm)
+
+    lens = MPI.Allgather(Int32(length(SCM.selectedcouplingindices)), comm)
+    allcouplingindices = MPI.Allgatherv(SCM.selectedcouplingindices, lens, comm)
+    allcouplingindices = sort([allcouplingindices...])
+    @test allcouplingindices == 1:SCM.ncouplingblocks
+
+    lens = MPI.Allgather(Int32(length(SCM.selectedlocalindices)), comm)
+    alllocalindices = MPI.Allgatherv(SCM.selectedlocalindices, lens, comm)
+    alllocalindices = sort([alllocalindices...])
+    @test alllocalindices == 1:SCM.nlocalblocks
+
     SCMf = factorise!(deepcopy(SCM);
       callback=MPICallBack(comm, rank, commsize), inplace=false)
     for (c, i, li) in SCM.enumeratelocalindices

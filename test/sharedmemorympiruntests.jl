@@ -13,17 +13,14 @@ struct MPICallBack{T}
   commsize::Int
 end
 
-(cb::MPICallBack)() = MPI.Barrier(cb.comm)
+(cb::MPICallBack)(A) = MPI.Barrier(cb.comm)
 # this could be better - send key-val pairs directly to rank that needs them
-function (cb::MPICallBack)(x::AbstractArray)
-    #sleep(cb.rank)
+function (cb::MPICallBack)(A, x::AbstractArray)
     MPI.Allreduce!(x, +, cb.comm)
-    #sleep(cb.rank)
-    #@show "B", cb.rank, x
     return x
 end
 
-function (cb::MPICallBack)(x::Dict) # a work around
+function (cb::MPICallBack)(A, x::Dict) # a work around
   # this could be better - send key-val pairs directly to rank that needs them
   s = IOBuffer()
   Serialization.serialize(s, x)
