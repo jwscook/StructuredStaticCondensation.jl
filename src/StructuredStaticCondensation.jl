@@ -95,24 +95,20 @@ function calculatelocalfactors(A::SSCMatrix{T}; inplace=DEFAULT_INPLACE) where T
   d = Dict{Int, lutype(A.A)}()
   for (c, i, li) in enumeratelocalindices(A) # parallelisable
     d[i] = inplace ? lu!(view(A.A, li, li)) : lu(view(A.A, li, li))
-#    @assert all(isfinite, d[i].L) # remove after debugged
-#    @assert all(isfinite, d[i].U) # remove after debugged
   end
   return d
 end
 
 function calculatecouplings(A::SSCMatrix{T,M}, localfactors) where {T,M}
   d = Dict{Tuple{Int, Int}, M}()
-  for (c, i, li) in enumeratecouplingindices(A) # parallelisable
+  @views for (c, i, li) in enumeratecouplingindices(A) # parallelisable
     if i - 1 >= 1
       lim = A.indices[i-1]
       d[(i-1, i)] = localfactors[i-1] \ A.A[lim, li]
-#      @assert all(isfinite, d[(i-1, i)]) # remove after debugged
     end
     if i + 1 <= length(A.indices)
       lip = A.indices[i+1]
       d[(i+1, i)] = localfactors[i+1] \ A.A[lip, li]
-#      @assert all(isfinite, d[(i+1, i)]) # remove after debugged
     end
   end
   return d
@@ -126,9 +122,8 @@ end
 
 function calculatelocalsolutions(F::SSCMatrixFactorisation{T,M}, b) where {T,M}
   d = Dict{Int, M}()
-  for (c, i, li) in enumeratelocalindices(F.A) # parallelisable
+  @views for (c, i, li) in enumeratelocalindices(F.A) # parallelisable
     d[i] = F.localfactors[i] \ b[li, :]
-#    @assert all(isfinite, d[i]) # remove after debugged
   end
   return d
 end
@@ -175,15 +170,14 @@ end
 function coupledx!(x, A::SSCMatrix{T}, bc; callback=defaultcallback) where {T}
   Ac = A.reducedlhs
   xc = Ac \ bc
-#  @assert all(isfinite, xc) # remove after debugged
-  for (c, i, ind) in enumeratecouplingindices(A)
+  @views for (c, i, ind) in enumeratecouplingindices(A)
     x[ind, :] .= xc[A.reducedcoupledindices[c], :]
   end
   return x
 end
 
 function localx!(x, cx, A::SSCMatrix{T}, localsolutions, couplings) where T
-  for (c, i, li) in enumeratelocalindices(A) # parallelisable
+  @views for (c, i, li) in enumeratelocalindices(A) # parallelisable
     rows = A.reducedlocalindices[c]
     x[li, :] .= localsolutions[i]
     for j in (i + 1, i - 1)
@@ -191,7 +185,6 @@ function localx!(x, cx, A::SSCMatrix{T}, localsolutions, couplings) where T
       x[li, :] .-= couplings[(i, j)] * cx[A.indices[j], :]
     end
   end
-#  @assert all(isfinite, x) # remove after debugged
   return x
 end
 
