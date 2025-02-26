@@ -82,6 +82,8 @@ Base.size(A::SSCMatrix, i) = size(A.A, i)
 islocalblock(i) = isodd(i)
 iscouplingblock(i) = !islocalblock(i)
 
+tile(A::SSCMatrix, i, j) = view(A.A, A.indices[i], A.indices[j])
+
 function enumeratelocalindices(A::SSCMatrix)
   return A.enumeratelocalindices[A.selectedlocalindices]
 end
@@ -94,7 +96,7 @@ lutype(A::Matrix{T}) where T = LU{T, Matrix{T}, Vector{Int64}}
 function calculatelocalfactors(A::SSCMatrix{T}; inplace=DEFAULT_INPLACE) where T
   d = Dict{Int, lutype(A.A)}()
   for (c, i, li) in enumeratelocalindices(A) # parallelisable
-    d[i] = inplace ? lu!(view(A.A, li, li)) : lu(view(A.A, li, li))
+    d[i] = inplace ? lu!(tile(A, i, i)) : lu(tile(A, i, i))
   end
   return d
 end
@@ -103,12 +105,10 @@ function calculatecouplings(A::SSCMatrix{T,M}, localfactors) where {T,M}
   d = Dict{Tuple{Int, Int}, M}()
   @views for (c, i, li) in enumeratecouplingindices(A) # parallelisable
     if i - 1 >= 1
-      lim = A.indices[i-1]
-      d[(i-1, i)] = localfactors[i-1] \ A.A[lim, li]
+      d[(i-1, i)] = localfactors[i-1] \ tile(A, i-1, i)
     end
     if i + 1 <= length(A.indices)
-      lip = A.indices[i+1]
-      d[(i+1, i)] = localfactors[i+1] \ A.A[lip, li]
+      d[(i+1, i)] = localfactors[i+1] \ tile(A, i+1, i)
     end
   end
   return d
@@ -137,8 +137,8 @@ function assemblecoupledrhs!(b, A::SSCMatrix, B, localsolutions)
   @views for (c, i, li) in enumeratecouplingindices(A) # parallelisable
     rows = A.reducedcoupledindices[c]
     b[rows, :] .= B[li, :]
-    b[rows, :] .-= A.A[li, A.indices[i-1]] * localsolutions[i-1]
-    b[rows, :] .-= A.A[li, A.indices[i+1]] * localsolutions[i+1]
+    b[rows, :] .-= tile(A, i, i-1) * localsolutions[i-1]
+    b[rows, :] .-= tile(A, i, i+1) * localsolutions[i+1]
   end
   return b
 end
@@ -148,19 +148,19 @@ function assemblecoupledlhs!(A::SSCMatrix, couplings;
   M = A.reducedlhs
   @views for (c, i, li) in enumeratecouplingindices(A) # parallelisable
     rows = A.reducedcoupledindices[c]
-    assignblocks && (M[rows, rows] .= A.A[li, li])
-    aim = view(A.A, li, A.indices[i-1])
-    aip = view(A.A, li, A.indices[i+1])
+    assignblocks && (M[rows, rows] .= tile(A, i, i))
+    aim = tile(A, i, i-1)
+    aip = tile(A, i, i+1)
     applycouplings && (M[rows, rows] .-= aim * couplings[(i - 1, i)])
     applycouplings && (M[rows, rows] .-= aip * couplings[(i + 1, i)])
     if c + 1 <= A.ncouplingblocks
       right = A.reducedcoupledindices[c + 1]
-      assignblocks && (M[rows, right] .= A.A[li, A.indices[i + 2]])
+      assignblocks && (M[rows, right] .= tile(A, i, i + 2))
       applycouplings && (M[rows, right] .-= aip * couplings[(i + 1, i + 2)])
     end
     if c - 1 >= 1
       left = A.reducedcoupledindices[c - 1]
-      assignblocks && (M[rows, left] .= A.A[li, A.indices[i - 2]])
+      assignblocks && (M[rows, left] .= tile(A, i, i - 2))
       applycouplings && (M[rows, left] .-= aim * couplings[(i - 1, i - 2)])
     end
   end
