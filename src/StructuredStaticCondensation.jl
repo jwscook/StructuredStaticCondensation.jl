@@ -6,14 +6,14 @@ export SSCMatrix, factorise!
 
 const DEFAULT_INPLACE = true
 
-struct SSCMatrix{T, M<:AbstractMatrix{T}, U} <: AbstractMatrix{T}
+struct SSCMatrix{T, M<:AbstractMatrix{T}, R, U} <: AbstractMatrix{T}
   A::M
   indices::Vector{UnitRange{Int}}
   nlocalblocks::Int
   ncouplingblocks::Int
   reducedlocalindices::Vector{UnitRange{Int}}
   reducedcoupledindices::Vector{UnitRange{Int}}
-  reducedlhs::M
+  reducedlhs::R
   enumeratelocalindices::U
   enumeratecouplingindices::U
   selectedlocalindices::Vector{Int}
@@ -39,8 +39,9 @@ struct SSCMatrix{T, M<:AbstractMatrix{T}, U} <: AbstractMatrix{T}
 
     totalcouplingblocksize = sum(length(i) for i in reducedcoupledindices)
     # allocate reduced lhs
-    reducedlhs = similar(A, totalcouplingblocksize, totalcouplingblocksize)
-    fill!(reducedlhs, 0)
+    #reducedlhs = similar(A, totalcouplingblocksize, totalcouplingblocksize)
+    #fill!(reducedlhs, 0)
+    reducedlhs = zeros(eltype(A), totalcouplingblocksize, totalcouplingblocksize)
 
     enumeratelocalindices = collect(zip(1:nlocalblocks, 1:2:length(blockindices), blockindices[1:2:end]))
     enumeratecouplingindices = collect(zip(1:ncouplingblocks, 2:2:length(blockindices), blockindices[2:2:end-1]))
@@ -50,15 +51,16 @@ struct SSCMatrix{T, M<:AbstractMatrix{T}, U} <: AbstractMatrix{T}
 
     M = typeof(A)
     U = typeof(enumeratelocalindices)
+    R = typeof(reducedlhs)
 
-    return new{T, M, U}(A, blockindices, nlocalblocks, ncouplingblocks,
+    return new{T, M, R, U}(A, blockindices, nlocalblocks, ncouplingblocks,
       reducedlocalindices, reducedcoupledindices, reducedlhs,
       enumeratelocalindices, enumeratecouplingindices,
       selectedlocalindices, selectedcouplingindices)
   end
 end
 
-function SSCMatrix(A::AbstractMatrix{T}, localblocksize, couplingblocksize) where T
+function calculateindices(A, localblocksize, couplingblocksize)
   n = size(A, 1)
   ncouplingblocks = (n - localblocksize) ÷ (localblocksize + couplingblocksize)
   nlocalblocks = ncouplingblocks + 1
@@ -75,6 +77,10 @@ function SSCMatrix(A::AbstractMatrix{T}, localblocksize, couplingblocksize) wher
   end
   push!(indices, a:a + localblocksize - 1)
   @assert indices[end][end] == size(A, 1) == size(A, 2)
+  return indices
+end
+function SSCMatrix(A::AbstractMatrix{T}, localblocksize, couplingblocksize) where T
+  indices = calculateindices(A, localblocksize, couplingblocksize)
   return SSCMatrix(A, indices)
 end
 Base.size(A::SSCMatrix) = (size(A.A, 1), size(A.A, 2))
@@ -101,8 +107,10 @@ function calculatelocalfactors(A::SSCMatrix{T}; inplace=DEFAULT_INPLACE) where T
   return d
 end
 
+couplingtype(A::AbstractMatrix) = typeof(A)
+
 function calculatecouplings(A::SSCMatrix{T,M}, localfactors) where {T,M}
-  d = Dict{Tuple{Int, Int}, M}()
+  d = Dict{Tuple{Int, Int}, couplingtype(A.A)}()
   @views for (c, i, li) in enumeratecouplingindices(A) # parallelisable
     if i - 1 >= 1
       d[(i-1, i)] = localfactors[i-1] \ tile(A, i-1, i)
@@ -114,22 +122,25 @@ function calculatecouplings(A::SSCMatrix{T,M}, localfactors) where {T,M}
   return d
 end
 
-struct SSCMatrixFactorisation{T,M,U,V}
-  A::SSCMatrix{T,M}
-  localfactors::U
-  couplings::V
+struct SSCMatrixFactorisation{T,M,R,U,V,W}
+  A::SSCMatrix{T,M,R,U}
+  localfactors::V
+  couplings::W
 end
 
-function calculatelocalsolutions(F::SSCMatrixFactorisation{T,M}, b) where {T,M}
-  d = Dict{Int, M}()
+function calculatelocalsolutions(F::SSCMatrixFactorisation{T,M,R}, b) where {T,M,R}
+  d = Dict{Int, R}()
   @views for (c, i, li) in enumeratelocalindices(F.A) # parallelisable
     d[i] = F.localfactors[i] \ b[li, :]
   end
   return d
 end
 
-function assemblecoupledrhs(A::SSCMatrix, B, localsolutions)
-  b = similar(A.reducedlhs, size(A.reducedlhs, 1), size(B, 2))
+function assemblecoupledrhs(A::SSCMatrix{T}, B, localsolutions) where T
+  m = size(A.reducedlhs, 1)
+  n = size(B, 2)
+  mn = n == 1 ? (m,) : (n, m)
+  b = similar(B, mn...)
   fill!(b, 0)
   return assemblecoupledrhs!(b, A, B, localsolutions)
 end
