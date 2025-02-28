@@ -250,9 +250,6 @@ function LinearAlgebra.ldiv!(x, F::SSCMatrixFactorisation{T}, b;
   localsolutions = calculatelocalsolutions(F, b)
   callback(F, localsolutions)
 
-  # build the solution out of two vectors so that the second callback
-  # doesn't double count values during its MPI reduction
-  # this could be better, if 
   bc = assemblecoupledrhs(F.A, b, localsolutions)
   callback(F, bc)
 
