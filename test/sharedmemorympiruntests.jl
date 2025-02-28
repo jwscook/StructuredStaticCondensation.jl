@@ -2,6 +2,7 @@ using MPI
 MPI.Init()
 
 include("mpiinclude.jl")
+include("matrixbuilder.jl")
 
 using StructuredStaticCondensation
 
@@ -28,18 +29,10 @@ using Random, Test, LinearAlgebra
   sharedrank = MPI.Comm_rank(sharedcomm)
   sharedsize = MPI.Comm_size(sharedcomm)
 
-  function dotest(tmp, L, C)
-    A, win = makesharedmatrix(sharedrank, sharedcomm, tmp)
-    (x,b) = if sharedrank == 0
-      b = rand(size(A, 1))
-      x = tmp \ b
-      (x, b)
-    else
-      (nothing, nothing)
-    end
-    x = MPI.bcast(x, 0, sharedcomm)
+  function dotest(Atmp, x, b, L, C)
+    A, win = makesharedmatrix(sharedrank, sharedcomm, Atmp)
     b = MPI.bcast(b, 0, sharedcomm)
-
+    x = MPI.bcast(x, 0, sharedcomm)
     SCM = SSCMatrix(A, L, C)
     StructuredStaticCondensation.distributeenumerations!(SCM, sharedrank, sharedsize)
     sleep(rank)
@@ -48,35 +41,14 @@ using Random, Test, LinearAlgebra
   end
 
   for (L, C) in ((3, 2), (4, 2), (16, 4), (5, 7), (128, 64), (256, 128), (1024, 512))
-    A11, A33, A55, A77 = (rand(L, L) for _ in 1:4)
-    t12, t32, t34, t54, t56, t76 = (rand(L, C) for _ in 1:6)
-    s21, s23, s43, s45, s65, s67 = (rand(C, L) for _ in 1:6)
-    a22, a44, a66, a24, a42, a46, a64 = (rand(C, C) for _ in 1:7)
-    zLL = zeros(L, L)
-    zCL = zeros(C, L)
-    zLC = zeros(L, C)
-    zCC = zeros(C, C)
-   
-    tmp = [A11 t12 zLL;
-           s21 a22 s23;
-           zLL t32 A33]
-    dotest(tmp, L, C)
-
-    tmp = [A11 t12 zLL zLC zLL;
-           s21 a22 s23 a24 zCL;
-           zLL t32 A33 t34 zLL;
-           zCL a42 s43 a44 s45;
-           zLL zLC zLL t54 A55]
-    dotest(tmp, L, C)
-
-    tmp = [A11 t12 zLL zLC zLL zLC zLL;
-           s21 a22 s23 a24 zCL zCC zCL;
-           zLL t32 A33 t34 zLL zLC zLL;
-           zCL a42 s43 a44 s45 a46 zCL;
-           zLL zLC zLL t54 A55 t56 zLL;
-           zCL zCC zCL a64 s65 a66 s67;
-           zLL zLC zLL zLC zLL t76 A77]
-    dotest(tmp, L, C)
+    for nblocks in (3, 5, 7, 9)
+      A, x, b = buildmatrix(L, C, nblocks)
+      dotest(A, x, b, L, C)
+      SCM = SSCMatrix(A, L, C)
+      SCMf = factorise!(SCM; inplace=true)
+      z = zeros(eltype(x), size(x))
+      @test ldiv!(z, SCMf, b; inplace=true) ≈ x
+    end
   end
 end
 

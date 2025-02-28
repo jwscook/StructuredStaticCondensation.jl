@@ -49,8 +49,8 @@ using Random, Test, LinearAlgebra, SparseArrays
   end
 
   for (L, C) in ((3, 2), (4, 2), (16, 4), (5, 7), (128, 64), (256, 128), (1024, 512))
-    for nrows in (3, 5, 7, 9)
-      A, x, b = buildmatrix(L, C, nrows)
+    for nblocks in (3, 5, 7, 9)
+      A, x, b = buildmatrix(L, C, nblocks)
       dotest(A, x, b, L, C)
       SCM = SSCMatrix(A, L, C)
 #      SCMf = factorise!(SCM; inplace=true)
@@ -63,7 +63,7 @@ using Random, Test, LinearAlgebra, SparseArrays
         luS = lu(S)
         ta = @elapsed lu!(luS, S)
         t0 = @elapsed (luS \ b)
-        @show L, C, nrows, t1 / t0, tb / ta
+        @show L, C, nblocks, t1 / t0, tb / ta
       end
     end
   end
