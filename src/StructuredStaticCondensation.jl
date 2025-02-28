@@ -126,6 +126,8 @@ struct SSCMatrixFactorisation{T,M,R,U,V,W}
   A::SSCMatrix{T,M,R,U}
   localfactors::V
   couplings::W
+  allcoupledindices::Vector{Int}
+  alllocalindices::Vector{Int}
 end
 
 function calculatelocalsolutions(F::SSCMatrixFactorisation{T,M,R}, b) where {T,M,R}
@@ -225,7 +227,11 @@ function factorise!(A::SSCMatrix; callback=defaultcallback, inplace=DEFAULT_INPL
   callback(A, couplings)
   assemblecoupledlhs!(A, couplings; applycouplings=true)
   callback(A, A.reducedlhs)
-  return SSCMatrixFactorisation(A, localfactors, couplings)
+
+  allcoupledindices = reduce(vcat, collect.(li for (_, _, li) in A.enumeratecouplingindices))
+  alllocalindices = reduce(vcat, collect.(li for (_, _, li) in A.enumeratelocalindices))
+
+  return SSCMatrixFactorisation(A, localfactors, couplings, allcoupledindices, alllocalindices)
 end
 
 function LinearAlgebra.ldiv!(A::SSCMatrixFactorisation{T}, b;
@@ -235,28 +241,26 @@ function LinearAlgebra.ldiv!(A::SSCMatrixFactorisation{T}, b;
 end
 
 # inplace won't do anything, but this is needed to keep the API consistent
-function LinearAlgebra.ldiv!(x, A::SSCMatrixFactorisation{T}, b;
+function LinearAlgebra.ldiv!(x, F::SSCMatrixFactorisation{T}, b;
     callback=defaultcallback, inplace=DEFAULT_INPLACE) where {T}
 
-  callback(A)
-  localsolutions = calculatelocalsolutions(A, b)
-  callback(A, localsolutions)
+  callback(F)
+  localsolutions = calculatelocalsolutions(F, b)
+  callback(F, localsolutions)
 
   # build the solution out of two vectors so that the second callback
   # doesn't double count values during its MPI reduction
   # this could be better, if 
-  bc = assemblecoupledrhs(A.A, b, localsolutions)
-  callback(A, bc)
+  bc = assemblecoupledrhs(F.A, b, localsolutions)
+  callback(F, bc)
 
   cx = x
-  cx = coupledx!(cx, A.A, bc; callback=callback)
-  callback(A,cx)
+  cx = coupledx!(cx, F.A, bc; callback=callback)
+  callback(F, view(cx, F.allcoupledindices, :))
 
-  lx = zeros(T, size(x))
-  lx = localx!(lx, cx, A.A, localsolutions, A.couplings)
-  callback(A, lx)
-
-  x .+= lx
+  lx = cx
+  lx = localx!(lx, cx, F.A, localsolutions, F.couplings)
+  callback(F, view(lx, F.alllocalindices, :))
 
   return x
 end
