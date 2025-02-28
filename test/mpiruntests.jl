@@ -56,7 +56,7 @@ using Random, Test, LinearAlgebra, SparseArrays
 #      SCMf = factorise!(SCM; inplace=true)
       tb = @elapsed SCMf = factorise!(deepcopy(SCM); inplace=true)
       z = zeros(eltype(x), size(x))
-      @test ldiv!(z, SCMf, b; inplace=true) ≈ x
+      @test ldiv!(z, SCMf, b) ≈ x
       t1 = @elapsed ldiv!(z, SCMf, b)
       if rank == 0
         S = dropzeros!(sparse(A))

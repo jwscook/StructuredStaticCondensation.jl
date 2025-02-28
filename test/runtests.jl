@@ -1,5 +1,5 @@
 using StructuredStaticCondensation
-using Random, Test, LinearAlgebra, SparseArrays
+using Random, Test, LinearAlgebra, SparseArrays#, StatProfilerHTML
 Random.seed!(0)
 include("matrixbuilder.jl")
 @testset "SSCCondensation" begin
@@ -9,8 +9,9 @@ include("matrixbuilder.jl")
       SCM = SSCMatrix(A, L, C)
       tb = @elapsed SCMf = factorise!(SCM; inplace=true)
       z = zeros(eltype(x), size(x))
-      @test ldiv!(z, SCMf, b; inplace=true) ≈ x
+      @test ldiv!(z, SCMf, b) ≈ x
       t1 = @elapsed ldiv!(z, SCMf, b)
+#      @profilehtml ldiv!(z, SCMf, b)
       S = dropzeros!(sparse(A))
       luS = lu(S)
       ta = @elapsed lu!(luS, S)

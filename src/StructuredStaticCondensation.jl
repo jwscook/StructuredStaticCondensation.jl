@@ -237,14 +237,13 @@ function factorise!(A::SSCMatrix; callback=defaultcallback, inplace=DEFAULT_INPL
 end
 
 function LinearAlgebra.ldiv!(A::SSCMatrixFactorisation{T}, b;
-    callback=defaultcallback, inplace=DEFAULT_INPLACE) where {T}
+    callback=defaultcallback) where {T}
   x = zeros(T, size(b))
-  return ldiv!(x, A, b; callback=callback, inplace=inplace)
+  return ldiv!(x, A, b; callback=callback)
 end
 
-# inplace won't do anything, but this is needed to keep the API consistent
 function LinearAlgebra.ldiv!(x, F::SSCMatrixFactorisation{T}, b;
-    callback=defaultcallback, inplace=DEFAULT_INPLACE) where {T}
+    callback=defaultcallback) where {T}
 
   callback(F)
   localsolutions = calculatelocalsolutions(F, b)

@@ -47,7 +47,7 @@ using Random, Test, LinearAlgebra
       SCM = SSCMatrix(A, L, C)
       SCMf = factorise!(SCM; inplace=true)
       z = zeros(eltype(x), size(x))
-      @test ldiv!(z, SCMf, b; inplace=true) ≈ x
+      @test ldiv!(z, SCMf, b) ≈ x
     end
   end
 end
