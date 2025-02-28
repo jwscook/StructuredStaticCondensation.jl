@@ -18,6 +18,8 @@ struct SSCMatrix{T, M<:AbstractMatrix{T}, R, U} <: AbstractMatrix{T}
   enumeratecouplingindices::U
   selectedlocalindices::Vector{Int}
   selectedcouplingindices::Vector{Int}
+  alllocalindices::Vector{Int}
+  allcouplingindices::Vector{Int}
   function SSCMatrix(A::AbstractMatrix{T}, blockindices) where T
     n = size(A, 1)
     @assert isodd(length(blockindices))
@@ -49,6 +51,9 @@ struct SSCMatrix{T, M<:AbstractMatrix{T}, R, U} <: AbstractMatrix{T}
     selectedlocalindices = collect(1:nlocalblocks)
     selectedcouplingindices = collect(1:ncouplingblocks)
 
+    alllocalindices = reduce(vcat, collect.(li for (_, _, li) in enumeratelocalindices))
+    allcouplingindices = reduce(vcat, collect.(li for (_, _, li) in enumeratecouplingindices))
+
     M = typeof(A)
     U = typeof(enumeratelocalindices)
     R = typeof(reducedlhs)
@@ -56,7 +61,8 @@ struct SSCMatrix{T, M<:AbstractMatrix{T}, R, U} <: AbstractMatrix{T}
     return new{T, M, R, U}(A, blockindices, nlocalblocks, ncouplingblocks,
       reducedlocalindices, reducedcoupledindices, reducedlhs,
       enumeratelocalindices, enumeratecouplingindices,
-      selectedlocalindices, selectedcouplingindices)
+      selectedlocalindices, selectedcouplingindices,
+      alllocalindices, allcouplingindices)
   end
 end
 
@@ -122,12 +128,11 @@ function calculatecouplings(A::SSCMatrix{T,M}, localfactors) where {T,M}
   return d
 end
 
-struct SSCMatrixFactorisation{T,M,R,U,V,W}
+struct SSCMatrixFactorisation{T,M,R,U,V,W,X}
   A::SSCMatrix{T,M,R,U}
-  localfactors::V
-  couplings::W
-  allcoupledindices::Vector{Int}
-  alllocalindices::Vector{Int}
+  lureducedlhs::V
+  localfactors::W
+  couplings::X
 end
 
 function calculatelocalsolutions(F::SSCMatrixFactorisation{T,M,R}, b) where {T,M,R}
@@ -181,12 +186,10 @@ function assemblecoupledlhs!(A::SSCMatrix{T}, couplings;
   return M
 end
 
-function coupledx!(x, A::SSCMatrix{T}, bc; callback=defaultcallback) where {T}
-  Ac = A.reducedlhs
-  xc = Ac \ bc
-  @inbounds for (c, i, ind) in enumeratecouplingindices(A)
-    copyto!(view(x, ind, :), view(xc, A.reducedcoupledindices[c], :))
-  end
+function coupledx!(x, F::SSCMatrixFactorisation{T}, bc; callback=defaultcallback) where {T}
+  Ac = F.lureducedlhs
+  xc = view(x, F.A.allcouplingindices, :)
+  xc .= Ac \ bc
   return x
 end
 
@@ -228,10 +231,9 @@ function factorise!(A::SSCMatrix; callback=defaultcallback, inplace=DEFAULT_INPL
   assemblecoupledlhs!(A, couplings; applycouplings=true)
   callback(A, A.reducedlhs)
 
-  allcoupledindices = reduce(vcat, collect.(li for (_, _, li) in A.enumeratecouplingindices))
-  alllocalindices = reduce(vcat, collect.(li for (_, _, li) in A.enumeratelocalindices))
+  lureducedlhs = lu!(A.reducedlhs)
 
-  return SSCMatrixFactorisation(A, localfactors, couplings, allcoupledindices, alllocalindices)
+  return SSCMatrixFactorisation(A, lureducedlhs, localfactors, couplings)
 end
 
 function LinearAlgebra.ldiv!(A::SSCMatrixFactorisation{T}, b;
@@ -255,12 +257,11 @@ function LinearAlgebra.ldiv!(x, F::SSCMatrixFactorisation{T}, b;
   callback(F, bc)
 
   cx = x
-  cx = coupledx!(cx, F.A, bc; callback=callback)
-  callback(F, view(cx, F.allcoupledindices, :))
+  cx = coupledx!(cx, F, bc; callback=callback)
 
   lx = cx
   lx = localx!(lx, cx, F.A, localsolutions, F.couplings)
-  callback(F, view(lx, F.alllocalindices, :))
+  callback(F, view(lx, F.A.alllocalindices, :))
 
   return x
 end
