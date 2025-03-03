@@ -41,8 +41,6 @@ struct SSCMatrix{T, M<:AbstractMatrix{T}, R, U} <: AbstractMatrix{T}
 
     totalcouplingblocksize = sum(length(i) for i in reducedcoupledindices)
     # allocate reduced lhs
-    #reducedlhs = similar(A, totalcouplingblocksize, totalcouplingblocksize)
-    #fill!(reducedlhs, 0)
     reducedlhs = zeros(eltype(A), totalcouplingblocksize, totalcouplingblocksize)
 
     enumeratelocalindices = collect(zip(1:nlocalblocks, 1:2:length(blockindices), blockindices[1:2:end]))
@@ -133,12 +131,13 @@ struct SSCMatrixFactorisation{T,M,R,U,V,W,X}
   lureducedlhs::V
   localfactors::W
   couplings::X
+  reducedrhswork::Vector{T}
 end
 
 function calculatelocalsolutions(F::SSCMatrixFactorisation{T,M,R}, b) where {T,M,R}
-  d = Dict{Int, R}()
+  d = Dict{Int, Matrix{T}}()
   @views for (c, i, li) in enumeratelocalindices(F.A) # parallelisable
-      d[i] = F.localfactors[i] \ b[li, :]
+    d[i] = F.localfactors[i] \ b[li, :]
   end
   return d
 end
@@ -189,7 +188,15 @@ end
 function coupledx!(x, F::SSCMatrixFactorisation{T}, bc; callback=defaultcallback) where {T}
   Ac = F.lureducedlhs
   xc = view(x, F.A.allcouplingindices, :)
-  xc .= Ac \ bc
+  # copyto!(xc, bc); ldiv!(Ac, xc)
+  w = F.reducedrhswork
+  for j in 1:size(bc, 2)
+    copyto!(w, view(bc, :, j))
+    LinearAlgebra._apply_ipiv_rows!(Ac, w)
+    LinearAlgebra.LAPACK.trtrs!('L', 'N', 'U', Ac.factors, w)
+    LinearAlgebra.LAPACK.trtrs!('U', 'N', 'N', Ac.factors, w)
+    copyto!(view(xc, :, j), w)
+  end
   return x
 end
 
@@ -220,6 +227,8 @@ function distributeenumerations!(A::SSCMatrix, rank, commsize)
     filter!(i->!in(i, indices), collect(eachindex(A.selectedcouplingindices))))
 end
 
+factorise!(A) = lu!(A)
+
 function factorise!(A::SSCMatrix; callback=defaultcallback, inplace=DEFAULT_INPLACE)
   callback(A)
   assemblecoupledlhs!(A, nothing; assignblocks=true)
@@ -231,9 +240,10 @@ function factorise!(A::SSCMatrix; callback=defaultcallback, inplace=DEFAULT_INPL
   assemblecoupledlhs!(A, couplings; applycouplings=true)
   callback(A, A.reducedlhs)
 
-  lureducedlhs = lu!(A.reducedlhs)
+  lureducedlhs = factorise!(A.reducedlhs)
+  reducedrhswork = zeros(eltype(A), size(A.reducedlhs, 1))
 
-  return SSCMatrixFactorisation(A, lureducedlhs, localfactors, couplings)
+  return SSCMatrixFactorisation(A, lureducedlhs, localfactors, couplings, reducedrhswork)
 end
 
 function LinearAlgebra.ldiv!(A::SSCMatrixFactorisation{T}, b;
