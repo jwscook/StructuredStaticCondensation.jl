@@ -5,6 +5,8 @@ version = "0.1.0"
 
 [deps]
 LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
+RightLookLU = "e1f070b0-f140-4b67-b535-6d047498f3ed"
+StaticCondensation = "d807e5ef-c177-4029-9a42-4f6bdd8c3f49"
 
 [extras]
 MPI = "da04e1cc-30fd-572f-bb4f-1f8673147195"

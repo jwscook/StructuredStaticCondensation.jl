@@ -1,6 +1,8 @@
 module StructuredStaticCondensation
 
 using LinearAlgebra, Base.Threads
+using RightLookLU
+import RightLookLU: tile
 
 export SSCMatrix, factorise!
 
@@ -42,6 +44,7 @@ struct SSCMatrix{T, M<:AbstractMatrix{T}, R, U} <: AbstractMatrix{T}
     totalcouplingblocksize = sum(length(i) for i in reducedcoupledindices)
     # allocate reduced lhs
     reducedlhs = zeros(eltype(A), totalcouplingblocksize, totalcouplingblocksize)
+    reducedlhs = RLLUMatrix(reducedlhs, reducedcoupledindices)
 
     enumeratelocalindices = collect(zip(1:nlocalblocks, 1:2:length(blockindices), blockindices[1:2:end]))
     enumeratecouplingindices = collect(zip(1:ncouplingblocks, 2:2:length(blockindices), blockindices[2:2:end-1]))
@@ -117,10 +120,10 @@ function calculatecouplings(A::SSCMatrix{T,M}, localfactors) where {T,M}
   d = Dict{Tuple{Int, Int}, couplingtype(A.A)}()
   @views for (c, i, li) in enumeratecouplingindices(A) # parallelisable
     if i - 1 >= 1
-        d[(i-1, i)] = localfactors[i-1] \ tile(A, i-1, i)
+      d[(i-1, i)] = localfactors[i-1] \ tile(A, i-1, i)
     end
     if i + 1 <= length(A.indices)
-        d[(i+1, i)] = localfactors[i+1] \ tile(A, i+1, i)
+      d[(i+1, i)] = localfactors[i+1] \ tile(A, i+1, i)
     end
   end
   return d
@@ -166,20 +169,27 @@ function assemblecoupledlhs!(A::SSCMatrix{T}, couplings;
   #  mul!(C, A, B, α, β) is C = A B α + C β.
   @views for (c, i, li) in enumeratecouplingindices(A) # parallelisable
     rows = A.reducedcoupledindices[c]
-    assignblocks && copyto!(view(M, rows, rows), tile(A, i, i))
+    assignblocks && copyto!(M[rows, rows], tile(A, i, i))
+    #assignblocks && copyto!(tile(M, c, c), tile(A, i, i))
     aim = tile(A, i, i-1)
     aip = tile(A, i, i+1)
     applycouplings && mul!(M[rows, rows], aim, couplings[(i - 1, i)], -one(T), one(T))
     applycouplings && mul!(M[rows, rows], aip, couplings[(i + 1, i)], -one(T), one(T))
+    #applycouplings && mul!(tile(M, c, c), aim, couplings[(i - 1, i)], -one(T), one(T))
+    #applycouplings && mul!(tile(M, c, c), aip, couplings[(i + 1, i)], -one(T), one(T))
     if c + 1 <= A.ncouplingblocks
       right = A.reducedcoupledindices[c + 1]
       assignblocks && copyto!(view(M, rows, right), tile(A, i, i + 2))
       applycouplings && mul!(M[rows, right], aip, couplings[(i + 1, i + 2)], -one(T), one(T))
+      #assignblocks && copyto!(tile(M, c, c+1), tile(A, i, i + 2))
+      #applycouplings && mul!(tile(M, c, c+1), aip, couplings[(i + 1, i + 2)], -one(T), one(T))
     end
     if c - 1 >= 1
       left = A.reducedcoupledindices[c - 1]
       assignblocks && copyto!(view(M, rows, left), tile(A, i, i - 2))
       applycouplings && mul!(M[rows, left], aim, couplings[(i - 1, i - 2)], -one(T), one(T))
+      #assignblocks && copyto!(tile(M, c, c - 1), tile(A, i, i - 2))
+      #applycouplings && mul!(tile(M, c, c - 1), aim, couplings[(i - 1, i - 2)], -one(T), one(T))
     end
   end
   return M
@@ -187,16 +197,20 @@ end
 
 function coupledx!(x, F::SSCMatrixFactorisation{T}, bc; callback=defaultcallback) where {T}
   Ac = F.lureducedlhs
+  #@show Ac.A.isempties
+  #@show Ac.A.A
   xc = view(x, F.A.allcouplingindices, :)
-  # copyto!(xc, bc); ldiv!(Ac, xc)
-  w = F.reducedrhswork
-  for j in 1:size(bc, 2)
-    copyto!(w, view(bc, :, j))
-    LinearAlgebra._apply_ipiv_rows!(Ac, w)
-    LinearAlgebra.LAPACK.trtrs!('L', 'N', 'U', Ac.factors, w)
-    LinearAlgebra.LAPACK.trtrs!('U', 'N', 'N', Ac.factors, w)
-    copyto!(view(xc, :, j), w)
-  end
+  copyto!(xc, bc); ldiv!(Ac, xc)
+#  ldiv!(xc, Ac, bc)
+#  copyto!(xc, bc); ldiv!(Ac, xc)
+  #w = F.reducedrhswork
+  #for j in 1:size(bc, 2)
+  #  copyto!(w, view(bc, :, j))
+  #  LinearAlgebra._apply_ipiv_rows!(Ac, w)
+  #  LinearAlgebra.LAPACK.trtrs!('L', 'N', 'U', Ac.factors, w)
+  #  LinearAlgebra.LAPACK.trtrs!('U', 'N', 'N', Ac.factors, w)
+  #  copyto!(view(xc, :, j), w)
+  #end
   return x
 end
 
@@ -240,7 +254,7 @@ function factorise!(A::SSCMatrix; callback=defaultcallback, inplace=DEFAULT_INPL
   assemblecoupledlhs!(A, couplings; applycouplings=true)
   callback(A, A.reducedlhs)
 
-  lureducedlhs = factorise!(A.reducedlhs)
+  lureducedlhs = lu!(A.reducedlhs)
   reducedrhswork = zeros(eltype(A), size(A.reducedlhs, 1))
 
   return SSCMatrixFactorisation(A, lureducedlhs, localfactors, couplings, reducedrhswork)
