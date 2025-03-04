@@ -117,10 +117,10 @@ function calculatecouplings(A::SSCMatrix{T,M}, localfactors) where {T,M}
   d = Dict{Tuple{Int, Int}, couplingtype(A.A)}()
   @views for (c, i, li) in enumeratecouplingindices(A) # parallelisable
     if i - 1 >= 1
-        d[(i-1, i)] = localfactors[i-1] \ tile(A, i-1, i)
+      d[(i-1, i)] = localfactors[i-1] \ tile(A, i-1, i)
     end
     if i + 1 <= length(A.indices)
-        d[(i+1, i)] = localfactors[i+1] \ tile(A, i+1, i)
+      d[(i+1, i)] = localfactors[i+1] \ tile(A, i+1, i)
     end
   end
   return d
