@@ -1,0 +1,1 @@
+# StructuredStaticCondensation.jl
