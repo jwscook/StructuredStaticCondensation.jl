@@ -7,21 +7,17 @@ using LinearAlgebra, Base.Threads
 export SSCMatrix, factorise!
 
 using StaticCondensation
-import StaticCondensation: factorise!
+import StaticCondensation: factorise!, free
 
 include("mpiinclude.jl")
 
-const DEFAULT_INPLACE = true
+const DEFAULT_INPLACE = false
 
 function allocatereducedlhs(A, totalcouplingblocksize, reducedcoupledindices, context)
   return zeros(eltype(A), totalcouplingblocksize, totalcouplingblocksize)
 end
 function allocatereducedlhs(A, totalcouplingblocksize, reducedcoupledindices,
-    context::SerialContext)
-  return zeros(eltype(A), totalcouplingblocksize, totalcouplingblocksize)
-end
-function allocatereducedlhs(A, totalcouplingblocksize, reducedcoupledindices,
-    context::MPIContext{DistributedMemoryMPI})
+    context::MPIContext)#{DistributedMemoryMPI})
   tmp = zeros(eltype(A), totalcouplingblocksize, totalcouplingblocksize)
   context = StaticCondensation.MPIContext(StaticCondensation.DistributedMemoryMPI(),
                                           context.comm, context.rank, context.size)
@@ -30,10 +26,6 @@ end
 function allocatereducedlhs(A, totalcouplingblocksize, reducedcoupledindices,
     context::MPIContext{SharedMemoryMPI})
 
-  #tmp = zeros(eltype(A), totalcouplingblocksize, totalcouplingblocksize)
-  #context = StaticCondensation.MPIContext(StaticCondensation.DistributedMemoryMPI(),
-  #                                        context.comm, context.rank, context.size)
-  #return SCMatrix(tmp, reducedcoupledindices; context=context)
   tmp = zeros(eltype(A), totalcouplingblocksize, totalcouplingblocksize)
   sharedtmp, win = sharedmemorympimatrix(tmp, context)
   context = StaticCondensation.MPIContext(StaticCondensation.SharedMemoryMPI(win),
@@ -77,8 +69,8 @@ struct SSCMatrix{T, M<:AbstractMatrix{T}, R, U, C} <: AbstractMatrix{T}
 
     totalcouplingblocksize = sum(length(i) for i in reducedcoupledindices)
     # allocate reduced lhs
-    #reducedlhs = allocatereducedlhs(A, totalcouplingblocksize, reducedcoupledindices, context)
-    reducedlhs = zeros(T, totalcouplingblocksize, totalcouplingblocksize)
+    reducedlhs = allocatereducedlhs(A, totalcouplingblocksize, reducedcoupledindices, context)
+    #reducedlhs = zeros(T, totalcouplingblocksize, totalcouplingblocksize)
 
     enumeratelocalindices = collect(zip(1:nlocalblocks, 1:2:length(blockindices), blockindices[1:2:end]))
     enumeratecouplingindices = collect(zip(1:ncouplingblocks, 2:2:length(blockindices), blockindices[2:2:end-1]))
@@ -103,6 +95,12 @@ struct SSCMatrix{T, M<:AbstractMatrix{T}, R, U, C} <: AbstractMatrix{T}
     distributeenumerations!(output)
     return output
   end
+end
+
+function free(A::SSCMatrix)
+  free(A.context)
+  free(A.reducedlhs)
+  return nothing
 end
 
 function calculateindices(A, localblocksize, couplingblocksize)
@@ -174,6 +172,12 @@ struct SSCMatrixFactorisation{T,M,R,U,V,W,X}
   localfactors::W
   couplings::X
   reducedrhswork::Vector{T}
+end
+
+function free(A::SSCMatrixFactorisation)
+  free(A.A)
+  free(A.lureducedlhs)
+  return nothing
 end
 
 function calculatelocalsolutions(F::SSCMatrixFactorisation{T,M,R}, b) where {T,M,R}

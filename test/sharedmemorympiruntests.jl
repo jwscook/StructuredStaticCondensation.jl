@@ -35,7 +35,8 @@ using Random, Test, LinearAlgebra, SparseArrays
     alllocalindices = MPI.Allgatherv(SCM.selectedlocalindices, lens, comm)
     alllocalindices = sort([alllocalindices...])
     @test alllocalindices == 1:SCM.nlocalblocks
-    SCMf = factorise!(deepcopy(SCM); inplace=true)
+    MPI.Barrier(comm)
+    SCMf = factorise!(SCM; inplace=false) # must not be in-place here
     for (c, i, li) in SCM.enumeratelocalindices
       lf = SCMf.localfactors[i]
       @test lf == lu(A[li, li])
@@ -47,12 +48,14 @@ using Random, Test, LinearAlgebra, SparseArrays
       @test cp == SCMf.localfactors[i+1] \ (A[SCM.indices[i+1], li])
     end
     bcopy = deepcopy(b)
-    @test ldiv!(SCM, b; inplace=false) ≈ x
     @test ldiv!(SCMf, bcopy) ≈ x
+    @test ldiv!(SCM, b; inplace=true) ≈ x
+    StructuredStaticCondensation.free(SCMf)
   end
 
   for (L, C) in ((16, 4), (128, 64), (256, 128), (1024, 512))
-    for nblocks in (3, 5, 7, 9)
+    for nblocks in reverse((3, 5, 7, 9))
+      MPI.Barrier(comm)
       dotest(L, C, nblocks)
     end
   end

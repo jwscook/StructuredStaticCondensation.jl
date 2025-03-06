@@ -28,6 +28,7 @@ struct DistributedMemoryMPI <: AbstractMPI end
 struct SharedMemoryMPI <: AbstractMPI
   win::MPI.Win
 end
+free(w::SharedMemoryMPI) = MPI.free(w.win)
 
 struct MPIContext{T<:AbstractMPI, C} <: AbstractContext
   mpitype::T
@@ -39,6 +40,8 @@ struct MPIContext{T<:AbstractMPI, C} <: AbstractContext
     return new{T, C}(mpitype, comm, rank, size)
   end
 end
+
+free(con::MPIContext{SharedMemoryMPI}) = free(con.mpitype)
 
 (cb::MPIContext)(A) = MPI.Barrier(cb.comm)
 function (cb::MPIContext{<:DistributedMemoryMPI})(A, x::Union{Matrix, Vector})
@@ -68,6 +71,7 @@ end
 
 function (cb::MPIContext)(A, x::Dict) # a work around
   # this could be better - send key-val pairs directly to rank that needs them
+  MPI.Barrier(cb.comm)
   s = IOBuffer()
   Serialization.serialize(s, x)
   s = take!(s)
@@ -86,11 +90,9 @@ end
 function sharedmemorympimatrix(tmparray, sharedcomm, sharedrank)
   dimslocal = sharedrank == 0 ? size(tmparray) : (0, 0)
   win, arrayptr = MPI.Win_allocate_shared(Array{Float64}, prod(dimslocal), sharedcomm)
-  MPI.Barrier(sharedcomm)
   A = MPI.Win_shared_query(Array{Float64}, prod(size(tmparray)), win; rank=0)
   A = reshape(A, size(tmparray))
   sharedrank == 0 && (A .= tmparray)
-  MPI.Barrier(sharedcomm)
   return A, win
 end
 
