@@ -1,22 +1,56 @@
 module StructuredStaticCondensation
 
-using LinearAlgebra
+using MPI
+
+using LinearAlgebra, Base.Threads
 
 export SSCMatrix, factorise!
 
-struct SSCMatrix{T, M<:AbstractMatrix{T}, U} <: AbstractMatrix{T}
+using StaticCondensation
+import StaticCondensation: factorise!, free
+
+include("mpiinclude.jl")
+
+const DEFAULT_INPLACE = false
+
+function allocatereducedlhs(A, totalcouplingblocksize, reducedcoupledindices, context)
+  return zeros(eltype(A), totalcouplingblocksize, totalcouplingblocksize)
+end
+function allocatereducedlhs(A, totalcouplingblocksize, reducedcoupledindices,
+    context::MPIContext)#{DistributedMemoryMPI})
+  tmp = zeros(eltype(A), totalcouplingblocksize, totalcouplingblocksize)
+  context = StaticCondensation.MPIContext(StaticCondensation.DistributedMemoryMPI(),
+                                          context.comm, context.rank, context.size)
+  return SCMatrix(tmp, reducedcoupledindices; context=context)
+end
+function allocatereducedlhs(A, totalcouplingblocksize, reducedcoupledindices,
+    context::MPIContext{SharedMemoryMPI})
+
+  tmp = zeros(eltype(A), totalcouplingblocksize, totalcouplingblocksize)
+  sharedtmp, win = sharedmemorympimatrix(tmp, context)
+  context = StaticCondensation.MPIContext(StaticCondensation.SharedMemoryMPI(win),
+                                          context.comm, context.rank, context.size)
+  return SCMatrix(sharedtmp, reducedcoupledindices; context=context)
+end
+
+struct SSCMatrix{T, M<:AbstractMatrix{T}, R, U, C} <: AbstractMatrix{T}
   A::M
   indices::Vector{UnitRange{Int}}
   nlocalblocks::Int
   ncouplingblocks::Int
   reducedlocalindices::Vector{UnitRange{Int}}
   reducedcoupledindices::Vector{UnitRange{Int}}
-  reducedlhs::M
+  reducedlhs::R
   enumeratelocalindices::U
   enumeratecouplingindices::U
-  function SSCMatrix(A::AbstractMatrix{T}, blockindices) where T
+  selectedlocalindices::Vector{Int}
+  selectedcouplingindices::Vector{Int}
+  alllocalindices::Vector{Int}
+  allcouplingindices::Vector{Int}
+  context::C
+  function SSCMatrix(A::AbstractMatrix{T}, blockindices; context=SerialContext()
+      ) where T
     n = size(A, 1)
-    @assert isodd(length(blockindices))
     ncouplingblocks = (length(blockindices) - 1) ÷ 2
     nlocalblocks = ncouplingblocks + 1
 
@@ -35,19 +69,41 @@ struct SSCMatrix{T, M<:AbstractMatrix{T}, U} <: AbstractMatrix{T}
 
     totalcouplingblocksize = sum(length(i) for i in reducedcoupledindices)
     # allocate reduced lhs
-    reducedlhs = similar(A, totalcouplingblocksize, totalcouplingblocksize)
-    fill!(reducedlhs, 0)
+    reducedlhs = allocatereducedlhs(A, totalcouplingblocksize, reducedcoupledindices, context)
+    #reducedlhs = zeros(T, totalcouplingblocksize, totalcouplingblocksize)
 
     enumeratelocalindices = collect(zip(1:nlocalblocks, 1:2:length(blockindices), blockindices[1:2:end]))
     enumeratecouplingindices = collect(zip(1:ncouplingblocks, 2:2:length(blockindices), blockindices[2:2:end-1]))
+
+    selectedlocalindices = collect(1:nlocalblocks)
+    selectedcouplingindices = collect(1:ncouplingblocks)
+
+    alllocalindices = reduce(vcat, collect.(li for (_, _, li) in enumeratelocalindices))
+    allcouplingindices = reduce(vcat, collect.(li for (_, _, li) in enumeratecouplingindices))
+
     M = typeof(A)
     U = typeof(enumeratelocalindices)
+    R = typeof(reducedlhs)
+    C = typeof(context)
 
-    return new{T, M, U}(A, blockindices, nlocalblocks, ncouplingblocks, reducedlocalindices, reducedcoupledindices, reducedlhs, enumeratelocalindices, enumeratecouplingindices)
+    output = new{T, M, R, U, C}(A, blockindices, nlocalblocks, ncouplingblocks,
+      reducedlocalindices, reducedcoupledindices, reducedlhs,
+      enumeratelocalindices, enumeratecouplingindices,
+      selectedlocalindices, selectedcouplingindices,
+      alllocalindices, allcouplingindices,
+      context)
+    distributeenumerations!(output)
+    return output
   end
 end
 
-function SSCMatrix(A::AbstractMatrix{T}, localblocksize, couplingblocksize) where T
+function free(A::SSCMatrix)
+  free(A.context)
+  free(A.reducedlhs)
+  return nothing
+end
+
+function calculateindices(A, localblocksize, couplingblocksize)
   n = size(A, 1)
   ncouplingblocks = (n - localblocksize) ÷ (localblocksize + couplingblocksize)
   nlocalblocks = ncouplingblocks + 1
@@ -64,160 +120,218 @@ function SSCMatrix(A::AbstractMatrix{T}, localblocksize, couplingblocksize) wher
   end
   push!(indices, a:a + localblocksize - 1)
   @assert indices[end][end] == size(A, 1) == size(A, 2)
-  return SSCMatrix(A, indices)
+  return indices
+end
+function SSCMatrix(A::AbstractMatrix{T}, localblocksize, couplingblocksize;
+    context=SerialContext()) where T
+  indices = calculateindices(A, localblocksize, couplingblocksize)
+  return SSCMatrix(A, indices; context=context)
 end
 Base.size(A::SSCMatrix) = (size(A.A, 1), size(A.A, 2))
 Base.size(A::SSCMatrix, i) = size(A.A, i)
 islocalblock(i) = isodd(i)
 iscouplingblock(i) = !islocalblock(i)
 
+tile(A::SSCMatrix, i, j) = view(A.A, A.indices[i], A.indices[j])
+
 function enumeratelocalindices(A::SSCMatrix)
-  return A.enumeratelocalindices # zip(1:A.nlocalblocks, 1:2:length(A.indices), A.indices[1:2:end])
+  return A.enumeratelocalindices[A.selectedlocalindices]
 end
 function enumeratecouplingindices(A::SSCMatrix)
-  return A.enumeratecouplingindices #zip(1:A.ncouplingblocks, 2:2:length(A.indices), A.indices[2:2:end-1])
+  return A.enumeratecouplingindices[A.selectedcouplingindices]
 end
 
-function factoriselocals(A::SSCMatrix{T}) where T
-  localfact = lu!(view(A.A, A.indices[1], A.indices[1])) # can't use a view
-  d = Dict{Int, typeof(localfact)}(1=>localfact)
-  for (c, i, li) in collect(enumeratelocalindices(A))[2:end]# parallelisable
-    d[i] = lu!(view(A.A, li, li)) # can't use a view
+lutype(A::Matrix{T}) where T = LU{T, Matrix{T}, Vector{Int64}}
+
+function calculatelocalfactors(A::SSCMatrix{T}; inplace=DEFAULT_INPLACE) where T
+  d = Dict{Int, lutype(A.A)}()
+  for (c, i, li) in enumeratelocalindices(A) # parallelisable
+    d[i] = inplace ? lu!(tile(A, i, i)) : lu(tile(A, i, i))
   end
   return d
 end
+
+couplingtype(A::AbstractMatrix) = typeof(A)
 
 function calculatecouplings(A::SSCMatrix{T,M}, localfactors) where {T,M}
-  d = Dict{Tuple{Int, Int}, M}()
-  for (c, i, li) in enumeratecouplingindices(A) # parallelisable
+  d = Dict{Tuple{Int, Int}, couplingtype(A.A)}()
+  @views for (c, i, li) in enumeratecouplingindices(A) # parallelisable
     if i - 1 >= 1
-      lim = A.indices[i-1]
-      d[(i-1, i)] = localfactors[i-1] \ A.A[lim, li]
+      d[(i-1, i)] = localfactors[i-1] \ tile(A, i-1, i)
     end
     if i + 1 <= length(A.indices)
-      lip = A.indices[i+1]
-      d[(i+1, i)] = localfactors[i+1] \ A.A[lip, li]
+      d[(i+1, i)] = localfactors[i+1] \ tile(A, i+1, i)
     end
   end
   return d
 end
 
-struct SSCMatrixFactorisation{T,M,U,V}
-  A::SSCMatrix{T,M}
-  localfactors::U
-  couplings::V
+struct SSCMatrixFactorisation{T,M,R,U,V,W,X}
+  A::SSCMatrix{T,M,R,U}
+  lureducedlhs::V
+  localfactors::W
+  couplings::X
+  reducedrhswork::Vector{T}
 end
 
-function calculatelocalsolutions(F::SSCMatrixFactorisation{T,M}, b) where {T,M}
-  d = Dict{Int, M}()
-  for (c, i, li) in enumeratelocalindices(F.A) # parallelisable
+function free(A::SSCMatrixFactorisation)
+  free(A.A)
+  free(A.lureducedlhs)
+  return nothing
+end
+
+function calculatelocalsolutions(F::SSCMatrixFactorisation{T,M,R}, b) where {T,M,R}
+  d = Dict{Int, Matrix{T}}()
+  @views for (c, i, li) in enumeratelocalindices(F.A) # parallelisable
     d[i] = F.localfactors[i] \ b[li, :]
   end
   return d
 end
 
-function couplingblockindices(A::SSCMatrix, i)
-  @assert i > 1
-  return A.indices[i] .- A.indices[i-1][1] .+ 1
+function assemblecoupledrhs(A::SSCMatrix{T}, B, localsolutions) where T
+  m = size(A.reducedlhs, 1)
+  n = size(B, 2)
+  mn = n == 1 ? (m,) : (n, m)
+  b = similar(B, mn...)
+  fill!(b, 0)
+  return assemblecoupledrhs!(b, A, B, localsolutions)
 end
-
-function localblockindices(A::SSCMatrix, i)
-  @assert i > 1
-  return A.indices[i] .- A.indices[i-1][1] .+ 1
-end
-
-function assemblecoupledrhs(A::SSCMatrix, B, localsolutions, couplings)
-  b = similar(A.reducedlhs, size(A.reducedlhs, 1), size(B, 2))
-  return assemblecoupledrhs!(b, A, B, localsolutions, couplings)
-end
-function assemblecoupledrhs!(b, A::SSCMatrix, B, localsolutions, couplings)
+function assemblecoupledrhs!(b, A::SSCMatrix{T}, B, localsolutions) where T
   @views for (c, i, li) in enumeratecouplingindices(A) # parallelisable
     rows = A.reducedcoupledindices[c]
     b[rows, :] .= B[li, :]
-    b[rows, :] .-= A.A[li, A.indices[i-1]] * localsolutions[i-1]
-    b[rows, :] .-= A.A[li, A.indices[i+1]] * localsolutions[i+1]
+    mul!(b[rows, :], tile(A, i, i-1), localsolutions[i - 1], -one(T), one(T))
+    mul!(b[rows, :], tile(A, i, i+1), localsolutions[i + 1], -one(T), one(T))
   end
   return b
 end
 
-function assemblecoupledlhs!(A::SSCMatrix, couplings; assignblocks=false, applycouplings=false)
+function assemblecoupledlhs!(A::SSCMatrix{T}, couplings;
+    assignblocks=false, applycouplings=false) where T
   M = A.reducedlhs
+  #  mul!(C, A, B, α, β) is C = A B α + C β.
   @views for (c, i, li) in enumeratecouplingindices(A) # parallelisable
     rows = A.reducedcoupledindices[c]
-    assignblocks && (M[rows, rows] .= A.A[li, li])
-    aim = A.A[li, A.indices[i-1]]
-    aip = A.A[li, A.indices[i+1]]
-    applycouplings && (M[rows, rows] .-= aim * couplings[(i - 1, i)])
-    applycouplings && (M[rows, rows] .-= aip * couplings[(i + 1, i)])
+    assignblocks && copyto!(view(M, rows, rows), tile(A, i, i))
+    aim = tile(A, i, i-1)
+    aip = tile(A, i, i+1)
+    applycouplings && mul!(M[rows, rows], aim, couplings[(i - 1, i)], -one(T), one(T))
+    applycouplings && mul!(M[rows, rows], aip, couplings[(i + 1, i)], -one(T), one(T))
     if c + 1 <= A.ncouplingblocks
       right = A.reducedcoupledindices[c + 1]
-      assignblocks && (M[rows, right] .= A.A[li, A.indices[i + 2]])
-      applycouplings && (M[rows, right] .-= aip * couplings[(i + 1, i + 2)])
+      assignblocks && copyto!(view(M, rows, right), tile(A, i, i + 2))
+      applycouplings && mul!(M[rows, right], aip, couplings[(i + 1, i + 2)], -one(T), one(T))
     end
     if c - 1 >= 1
       left = A.reducedcoupledindices[c - 1]
-      assignblocks && (M[rows, left] .= A.A[li, A.indices[i - 2]])
-      applycouplings && (M[rows, left] .-= aim * couplings[(i - 1, i - 2)])
+      assignblocks && copyto!(view(M, rows, left), tile(A, i, i - 2))
+      applycouplings && mul!(M[rows, left], aim, couplings[(i - 1, i - 2)], -one(T), one(T))
     end
   end
   return M
 end
 
-function coupledx!(x, A::SSCMatrix{T}, b, localsolutions, couplings) where {T}
-  Ac = assemblecoupledlhs!(A, couplings; applycouplings=true)
-  bc = assemblecoupledrhs(A, b, localsolutions, couplings)
-  xc = Ac \ bc
-  for (c, i, ind) in enumeratecouplingindices(A)
-    x[ind, :] .= xc[A.reducedcoupledindices[c], :]
+function coupledx!(x, Ac, bc, allcouplingindices, _)
+  xc = view(x, allcouplingindices, :)
+  #copyto!(xc, bc); ldiv!(Ac, xc)
+  ldiv!(xc, Ac, bc)
+  return x
+end
+function coupledx!(x, Ac::LU{T, Matrix{T}}, bc, allcouplingindices, rhswork) where T
+  xc = view(x, allcouplingindices, :)
+  for j in 1:size(bc, 2)
+    copyto!(rhswork, view(bc, :, j))
+    LinearAlgebra._apply_ipiv_rows!(Ac, rhswork)
+    LinearAlgebra.LAPACK.trtrs!('L', 'N', 'U', Ac.factors, rhswork)
+    LinearAlgebra.LAPACK.trtrs!('U', 'N', 'N', Ac.factors, rhswork)
+    copyto!(view(xc, :, j), rhswork)
   end
   return x
 end
 
-function localx!(x, A::SSCMatrix{T}, localsolutions, couplings) where T
-  for (c, i, li) in enumeratelocalindices(A) # parallelisable
+function coupledx!(x, F::SSCMatrixFactorisation{T}, bc) where {T}
+  Ac = F.lureducedlhs
+  return coupledx!(x, Ac, bc, F.A.allcouplingindices, F.reducedrhswork)
+end
+
+function localx!(x, cx, A::SSCMatrix{T}, localsolutions, couplings) where T
+  @inbounds for (c, i, li) in enumeratelocalindices(A) # parallelisable
     rows = A.reducedlocalindices[c]
-    x[li, :] .= localsolutions[i]
+    copyto!(view(x, li, :), localsolutions[i])
     for j in (i + 1, i - 1)
       0 < j <= length(A.indices) || continue
-      x[li, :] .-= couplings[(i, j)] * x[A.indices[j], :]
+      #  mul!(C, A, B, α, β) is C = A B α + C β.
+      @views mul!(x[li, :], couplings[(i, j)], cx[A.indices[j], :], -one(T), one(T))
     end
   end
   return x
 end
 
-defaultbarriercallback(args...) = nothing
+function distributeenumerations!(A::SSCMatrix{T,U,V,W,<:SerialContext}
+    ) where {T,U,V,W}
+  return nothing
+end
+function distributeenumerations!(A::SSCMatrix{T,U,V,W,<:MPIContext}
+    ) where {T,U,V,W}
+  rank = A.context.rank
+  commsize = A.context.size
+  @assert 0 <= rank < commsize
+  # first get the indices we want to keep
+  indices = rank+1:commsize:length(A.enumeratelocalindices)
+  # then delete all other entires using filter
+  deleteat!(A.selectedlocalindices,
+    filter!(i->!in(i, indices), collect(eachindex(A.selectedlocalindices))))
+  indices = rank+1:commsize:length(A.selectedcouplingindices)
+  deleteat!(A.selectedcouplingindices,
+    filter!(i->!in(i, indices), collect(eachindex(A.selectedcouplingindices))))
+end
 
-function factorise!(A::SSCMatrix; barriercallback=defaultbarriercallback)
+factorise!(A) = lu!(A)
+
+function factorise!(A::SSCMatrix; inplace=DEFAULT_INPLACE)
+  A.context(A)
   assemblecoupledlhs!(A, nothing; assignblocks=true)
-  barriercallback(A)
-  localfactors = factoriselocals(A)
-  barriercallback(A, localfactors)
+  A.context(A)
+  localfactors = calculatelocalfactors(A; inplace=inplace)
+  A.context(A, localfactors)
   couplings = calculatecouplings(A, localfactors)
-  barriercallback(A, localfactors, couplings)
-  return SSCMatrixFactorisation(A, localfactors, couplings)
+  A.context(A, couplings)
+  assemblecoupledlhs!(A, couplings; applycouplings=true)
+  A.context(A, A.reducedlhs)
+
+  lureducedlhs = factorise!(A.reducedlhs)
+  reducedrhswork = zeros(eltype(A), size(A.reducedlhs, 1))
+
+  return SSCMatrixFactorisation(A, lureducedlhs, localfactors, couplings, reducedrhswork)
 end
 
-function LinearAlgebra.ldiv!(A::SSCMatrixFactorisation{T}, b; barriercallback=defaultbarriercallback) where T
-
-  localsolutions = calculatelocalsolutions(A, b)
-
+function LinearAlgebra.ldiv!(A::SSCMatrixFactorisation{T}, b) where {T}
   x = zeros(T, size(b))
-  x = coupledx!(x, A.A, b, localsolutions, A.couplings)
-  barriercallback(x)
-  x = localx!(x, A.A, localsolutions, A.couplings)
-  barriercallback(x)
-  return x
+  return ldiv!(x, A, b)
 end
 
-function LinearAlgebra.ldiv!(A::SSCMatrix{T}, b) where T
-  F = factorise!(A)
+function LinearAlgebra.ldiv!(x, F::SSCMatrixFactorisation{T}, b) where {T}
 
+  F.A.context(F)
   localsolutions = calculatelocalsolutions(F, b)
+  F.A.context(F, localsolutions)
 
-  x = zeros(T, size(b))
-  x = coupledx!(x, F.A, b, localsolutions, F.couplings)
-  x = localx!(x, F.A, localsolutions, F.couplings)
+  bc = assemblecoupledrhs(F.A, b, localsolutions)
+  F.A.context(F, bc)
+
+  cx = x
+  cx = coupledx!(cx, F, bc)
+
+  lx = cx
+  lx = localx!(lx, cx, F.A, localsolutions, F.couplings)
+  F.A.context(F, view(lx, F.A.alllocalindices, :))
+
   return x
+end
+
+function LinearAlgebra.ldiv!(A::SSCMatrix{T}, b; inplace=DEFAULT_INPLACE) where T
+  F = factorise!(A; inplace=inplace)
+  return ldiv!(F, b)
 end
 
 end # module StructuredSSC
