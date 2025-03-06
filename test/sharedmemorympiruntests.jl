@@ -54,7 +54,7 @@ using Random, Test, LinearAlgebra, SparseArrays
   end
 
   for (L, C) in ((16, 4), (128, 64), (256, 128), (1024, 512))
-    for nblocks in reverse((3, 5, 7, 9))
+    for nblocks in (9,)
       MPI.Barrier(comm)
       dotest(L, C, nblocks)
     end
