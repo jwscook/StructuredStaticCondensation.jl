@@ -144,17 +144,18 @@ end
 lutype(A::Matrix{T}) where T = LU{T, Matrix{T}, Vector{Int64}}
 
 function calculatelocalfactors(A::SSCMatrix{T}; inplace=DEFAULT_INPLACE) where T
-  d = Dict{Int, lutype(A.A)}()
+  localfactors = Dict{Int, lutype(A.A)}()
   for (c, i, li) in enumeratelocalindices(A) # parallelisable
-    d[i] = inplace ? lu!(tile(A, i, i)) : lu(tile(A, i, i))
+    localfactors[i] = inplace ? lu!(tile(A, i, i)) : lu(tile(A, i, i))
   end
-  return d
+  return localfactors
 end
 
 couplingtype(A::AbstractMatrix) = typeof(A)
 
 function calculatecouplings(A::SSCMatrix{T,M}, localfactors) where {T,M}
   d = Dict{Tuple{Int, Int}, couplingtype(A.A)}()
+  # ith iterate needs localfactors i-1 and i+1
   @views for (c, i, li) in enumeratecouplingindices(A) # parallelisable
     if i - 1 >= 1
       d[(i-1, i)] = localfactors[i-1] \ tile(A, i-1, i)
@@ -210,6 +211,7 @@ function assemblecoupledlhs!(A::SSCMatrix{T}, couplings;
     assignblocks=false, applycouplings=false) where T
   M = A.reducedlhs
   #  mul!(C, A, B, α, β) is C = A B α + C β.
+  # ith iterate needs couplings (i±1, 1) and (i + 1, i + 2) and (i-1, i-2)
   @views for (c, i, li) in enumeratecouplingindices(A) # parallelisable
     rows = A.reducedcoupledindices[c]
     assignblocks && copyto!(view(M, rows, rows), tile(A, i, i))
@@ -275,15 +277,25 @@ function distributeenumerations!(A::SSCMatrix{T,U,V,W,<:MPIContext}
     ) where {T,U,V,W}
   rank = A.context.rank
   commsize = A.context.size
+
+  mylocalindices = distributeenumerations!(A.nlocalblocks, rank, commsize)
+  resize!(A.selectedlocalindices, length(mylocalindices))
+  A.selectedlocalindices .= mylocalindices
+
+  mycouplingindices = distributeenumerations!(A.ncouplingblocks, rank, commsize)
+  resize!(A.selectedcouplingindices, length(mycouplingindices))
+  A.selectedcouplingindices .= mycouplingindices
+end
+
+function distributeenumerations!(itlength::Int, rank, commsize)
   @assert 0 <= rank < commsize
   # first get the indices we want to keep
-  indices = rank+1:commsize:length(A.enumeratelocalindices)
+  indices = rank+1:commsize:itlength
   # then delete all other entires using filter
-  deleteat!(A.selectedlocalindices,
-    filter!(i->!in(i, indices), collect(eachindex(A.selectedlocalindices))))
-  indices = rank+1:commsize:length(A.selectedcouplingindices)
-  deleteat!(A.selectedcouplingindices,
-    filter!(i->!in(i, indices), collect(eachindex(A.selectedcouplingindices))))
+  output = collect(1:itlength)
+  deleteat!(output,
+            filter!(i->!in(i, indices), collect(1:itlength)))
+  return output
 end
 
 factorise!(A) = lu!(A)
@@ -293,8 +305,10 @@ function factorise!(A::SSCMatrix; inplace=DEFAULT_INPLACE)
   assemblecoupledlhs!(A, nothing; assignblocks=true)
   A.context(A)
   localfactors = calculatelocalfactors(A; inplace=inplace)
+  # share localfactors so that coupling iterate i has i+1 and i-1
   A.context(A, localfactors)
   couplings = calculatecouplings(A, localfactors)
+  # share couplines so ith coupling iterate has (i±1, i), (i+1, i+2),(i-1, i-2)
   A.context(A, couplings)
   assemblecoupledlhs!(A, couplings; applycouplings=true)
   A.context(A, A.reducedlhs)
