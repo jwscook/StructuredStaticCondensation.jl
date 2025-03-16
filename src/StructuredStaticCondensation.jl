@@ -151,21 +151,52 @@ function calculatelocalfactors(A::SSCMatrix{T}; inplace=DEFAULT_INPLACE) where T
   return localfactors
 end
 
+localfactorsowner!(A::SSCMatrix, i, j) = 0
+function localfactorsowner!(A::SSCMatrix{T,U,V,W,<:MPIContext}, i, j) where {T,U,V,W}
+  commsize = A.context.size
+  localfactorsindices = [distributeenumerations(A.nlocalblocks, i, commsize)
+                         for i in 0:commsize-1]
+  localfactorsindicestorank = Dict{Int, Int}()
+  for i in 1:A.nlocalblocks
+    localfactorsindicestorank[i] = findfirst(x->in(i), localfactorsindices)
+  end
+  return localfactorsindicestorank
+end
+
+
 couplingtype(A::AbstractMatrix) = typeof(A)
 
 function calculatecouplings(A::SSCMatrix{T,M}, localfactors) where {T,M}
-  d = Dict{Tuple{Int, Int}, couplingtype(A.A)}()
+  couplings = Dict{Tuple{Int, Int}, couplingtype(A.A)}()
   # ith iterate needs localfactors i-1 and i+1
   @views for (c, i, li) in enumeratecouplingindices(A) # parallelisable
     if i - 1 >= 1
-      d[(i-1, i)] = localfactors[i-1] \ tile(A, i-1, i)
+      couplings[(i-1, i)] = localfactors[i-1] \ tile(A, i-1, i)
     end
     if i + 1 <= length(A.indices)
-      d[(i+1, i)] = localfactors[i+1] \ tile(A, i+1, i)
+      couplings[(i+1, i)] = localfactors[i+1] \ tile(A, i+1, i)
     end
   end
-  return d
+  return couplings
 end
+
+couplingowner!(A::SSCMatrix, i, j) = 0
+function couplingowner!(A::SSCMatrix{T,U,V,W,<:MPIContext}, i, j) where {T,U,V,W}
+  commsize = A.context.size
+  couplingindices = [distributeenumerations(A.ncouplingblocks, i, commsize)
+                     for i in 0:commsize-1]
+  couplingindicestorank = Dict{Tuple{Int,Int}, Vector{Int}}()
+  for i in 1:A.ncouplingblocks
+    if i - 1 >= 1
+      couplingindicestorank[(i-1, i)] = findfirst(x->in(i), couplingindices)
+    end
+    if i + 1 <= length(A.indices)
+      couplingindicestorank[(i+1, i)] = findfirst(x->in(i), couplingindices)
+    end
+  end
+  return couplingindicestorank
+end
+
 
 struct SSCMatrixFactorisation{T,M,R,U,V,W,X}
   A::SSCMatrix{T,M,R,U}
@@ -278,16 +309,16 @@ function distributeenumerations!(A::SSCMatrix{T,U,V,W,<:MPIContext}
   rank = A.context.rank
   commsize = A.context.size
 
-  mylocalindices = distributeenumerations!(A.nlocalblocks, rank, commsize)
+  mylocalindices = distributeenumerations(A.nlocalblocks, rank, commsize)
   resize!(A.selectedlocalindices, length(mylocalindices))
   A.selectedlocalindices .= mylocalindices
 
-  mycouplingindices = distributeenumerations!(A.ncouplingblocks, rank, commsize)
+  mycouplingindices = distributeenumerations(A.ncouplingblocks, rank, commsize)
   resize!(A.selectedcouplingindices, length(mycouplingindices))
   A.selectedcouplingindices .= mycouplingindices
 end
 
-function distributeenumerations!(itlength::Int, rank, commsize)
+function distributeenumerations(itlength::Int, rank, commsize)
   @assert 0 <= rank < commsize
   # first get the indices we want to keep
   indices = rank+1:commsize:itlength
@@ -308,7 +339,7 @@ function factorise!(A::SSCMatrix; inplace=DEFAULT_INPLACE)
   # share localfactors so that coupling iterate i has i+1 and i-1
   A.context(A, localfactors)
   couplings = calculatecouplings(A, localfactors)
-  # share couplines so ith coupling iterate has (i±1, i), (i+1, i+2),(i-1, i-2)
+  # share couplings so ith coupling iterate has (i±1, i), (i+1, i+2),(i-1, i-2)
   A.context(A, couplings)
   assemblecoupledlhs!(A, couplings; applycouplings=true)
   A.context(A, A.reducedlhs)
